@@ -1,0 +1,16 @@
+{
+    "name": "leap360",
+    "private": true,
+    "version": "1.0.0",
+    "scripts": {
+        "dev": "concurrently \"pnpm --filter api dev\" \"pnpm --filter web dev\"",
+        "build": "pnpm --filter api build && pnpm --filter web build",
+        "migrate": "pnpm --filter api migrate",
+        "seed": "pnpm --filter api seed",
+        "worker": "pnpm --filter api worker"
+    },
+    "devDependencies": {
+        "concurrently": "^8.2.2",
+        "typescript": "^5.3.3"
+    }
+}

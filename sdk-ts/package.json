@@ -1,0 +1,18 @@
+{
+    "name": "@leap360/sdk",
+    "version": "1.0.0",
+    "description": "Leap360 Agent Control Plane TypeScript SDK",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc -w"
+    },
+    "dependencies": {
+        "openai": "^4.28.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.20",
+        "typescript": "^5.3.3"
+    }
+}
