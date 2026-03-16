@@ -6,13 +6,7 @@ import { traceRoutes } from "./routes/traces";
 dotenv.config();
 
 const app = Fastify({
-    logger: {
-        level: "info",
-        transport:
-            process.env.NODE_ENV !== "production"
-                ? { target: "pino-pretty" }
-                : undefined,
-    },
+    logger: true,
 });
 
 async function main() {
