@@ -37,18 +37,32 @@ async function runDemo() {
     // Wait a bit
     await new Promise(r => setTimeout(r, 1000));
 
-    console.log('\nSending second trace (via Agent context)...');
-    await customerSupportAgent.run(async (client) => {
-        try {
-            await client.chat.completions.create({
-                model: 'gpt-4',
-                messages: [{ role: 'system', content: 'You are helpful.' }, { role: 'user', content: 'Help me reset my password.' }],
-            });
-            console.log('✅ Second trace sent.');
-        } catch (e: any) {
-            console.log('Expected error, trace recorded.', e.message);
-        }
-    });
+    const prompts = [
+        "How do I track a package?",
+        "What is your return policy?",
+        "Can I change my shipping address?",
+        "I need help with a refund.",
+        "Where is my order #12345?"
+    ];
+
+    console.log('\nSending a batch of customer support traces...');
+    for (const text of prompts) {
+        await customerSupportAgent.run(async (client) => {
+            try {
+                console.log(`> Sending: ${text}`);
+                await client.chat.completions.create({
+                    model: 'gpt-4',
+                    messages: [
+                        { role: 'system', content: 'You are a helpful customer support assistant for Leap360 Store.' },
+                        { role: 'user', content: text }
+                    ],
+                });
+            } catch (e: any) {
+                // We expect failure because of fake key, but SDK logs the trace regardless!
+            }
+        });
+        await new Promise(r => setTimeout(r, 500));
+    }
 
     console.log('\nDemo complete. Check the dashboard at http://localhost:5173 to see the traces!');
 }
