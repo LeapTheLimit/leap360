@@ -1,16 +1,52 @@
 {
-    "name": "leap360",
-    "private": true,
-    "version": "1.0.0",
-    "scripts": {
-        "dev": "concurrently \"pnpm --filter api dev\" \"pnpm --filter web dev\"",
-        "build": "pnpm --filter api build && pnpm --filter web build",
-        "migrate": "pnpm --filter api migrate",
-        "seed": "pnpm --filter api seed",
-        "worker": "pnpm --filter api worker"
-    },
-    "devDependencies": {
-        "concurrently": "^8.2.2",
-        "typescript": "^5.3.3"
+  "name": "leap360-sdk",
+  "version": "1.0.0",
+  "description": "Leap360 AI Governance SDK — monitor, trace, and govern your AI agents in real-time",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     }
+  },
+  "bin": {
+    "leap360": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/make-executable.js",
+    "build:watch": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "test": "node dist/cli.js --version"
+  },
+  "keywords": [
+    "ai",
+    "governance",
+    "monitoring",
+    "tracing",
+    "llm",
+    "agents",
+    "observability",
+    "openai",
+    "gemini",
+    "leap360"
+  ],
+  "author": "Leap360",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.0.0",
+    "open": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
