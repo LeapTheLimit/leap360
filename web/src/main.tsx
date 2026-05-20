@@ -5,6 +5,9 @@ import App from './App'
 import { ServicesView } from './pages/ServicesView'
 import { TracesView } from './pages/TracesView'
 import { TraceDetailView } from './pages/TraceDetailView'
+import { KillSwitchView } from './pages/KillSwitchView'
+import { ViolationsView } from './pages/ViolationsView'
+import { PoliciesView } from './pages/PoliciesView'
 import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
@@ -16,6 +19,9 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route path="services" element={<ServicesView />} />
           <Route path="services/:serviceId/traces" element={<TracesView />} />
           <Route path="traces/:traceId" element={<TraceDetailView />} />
+          <Route path="killswitch" element={<KillSwitchView />} />
+          <Route path="violations" element={<ViolationsView />} />
+          <Route path="policies" element={<PoliciesView />} />
         </Route>
       </Routes>
     </BrowserRouter>

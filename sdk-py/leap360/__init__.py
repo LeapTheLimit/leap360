@@ -1,134 +1,457 @@
+"""
+leap360 — Python SDK for Leap360 AI Governance
+===============================================
+
+Usage::
+
+    from leap360 import Leap360Tracer
+    from openai import OpenAI
+
+    tracer = Leap360Tracer(
+        api_key="leap360-dev-secret-key-change-me",
+        project_id="00000000-0000-0000-0000-000000000001",
+        service_name="my-service",
+        # base_url defaults to http://localhost:4000 for local development
+    )
+
+    client = tracer.wrap(OpenAI())
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Hello!"}],
+    )
+"""
+
+from __future__ import annotations
+
 import os
 import uuid
 import json
 import time
-import getpass
 import threading
 from datetime import datetime, timezone
-import requests
-import contextvars
 from functools import wraps
+from typing import Callable, Optional, Any
+import contextvars
 
-# Context variables for tracking run state
-run_id_var = contextvars.ContextVar('run_id', default=None)
-agent_name_var = contextvars.ContextVar('agent_name', default=None)
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
-class Leap360:
-    def __init__(self, api_key: str, project_id: str, service_name: str, base_url: str = None):
-        self.api_key = api_key
-        self.project_id = project_id
-        self.service_name = service_name
-        self.base_url = (base_url or 'https://api.leap360.ai').rstrip('/')
-        self._wrapped_client = None
+# ─── Context vars (supports async and threaded code) ─────────────────────────
 
-    def wrap_openai(self, client):
+_run_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("run_id", default=None)
+_agent_name_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("agent_name", default=None)
+
+
+# ─── Main tracer class ────────────────────────────────────────────────────────
+
+class Leap360Tracer:
+    """
+    Central tracer.  Wrap any supported LLM client with ``tracer.wrap(client)``
+    and every call will be automatically traced and checked against the
+    kill-switch on your local Leap360 server.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        project_id: Optional[str] = None,
+        service_name: Optional[str] = None,
+        base_url: Optional[str] = None,
+        silent: bool = False,
+    ) -> None:
+        self.api_key = (
+            api_key
+            or os.environ.get("LEAP360_API_KEY")
+            or "leap360-dev-secret-key-change-me"
+        )
+        self.project_id = (
+            project_id
+            or os.environ.get("LEAP360_PROJECT_ID")
+            or "00000000-0000-0000-0000-000000000001"
+        )
+        self.service_name = (
+            service_name
+            or os.environ.get("LEAP360_SERVICE_NAME")
+            or "python-service"
+        )
+        self.base_url = (base_url or os.environ.get("LEAP360_BASE_URL") or "http://localhost:4000").rstrip("/")
+        self.silent = silent
+
+    # ── Kill-switch check ─────────────────────────────────────────────────────
+
+    def check_kill_switch(self, agent_name: Optional[str] = None) -> None:
+        """
+        Query the local Leap360 API to see if this project/agent is suspended.
+        Raises ``RuntimeError`` if suspended.  Silently passes if the API is
+        unreachable (fail-open behaviour so your app still works offline).
+        """
+        if not _HAS_REQUESTS:
+            return
+        try:
+            params: dict = {}
+            if agent_name:
+                params["agent"] = agent_name
+            resp = _requests.get(
+                f"{self.base_url}/v1/projects/{self.project_id}/killswitch/check",
+                params=params,
+                headers={"x-leap360-key": self.api_key},
+                timeout=2,
+            )
+            if resp.ok:
+                data = resp.json()
+                if not data.get("allowed", True):
+                    scope = data.get("scope", "unknown")
+                    reason = data.get("reason", "suspended")
+                    raise RuntimeError(
+                        f"[Leap360] KILL_SWITCH_ACTIVE ({scope}): {reason}"
+                    )
+        except RuntimeError:
+            raise
+        except Exception:
+            if not self.silent:
+                pass  # API unreachable — fail open
+
+    # ── Auto-detect & wrap ────────────────────────────────────────────────────
+
+    def wrap(self, client: Any) -> Any:
+        """
+        Auto-detect the client type and wrap it appropriately.
+
+        Supports: OpenAI, Anthropic, google.generativeai.GenerativeModel,
+                  google.genai.Client, boto3 Bedrock runtime client.
+        """
+        cls_name = type(client).__name__
+        module = type(client).__module__ or ""
+
+        if cls_name == "OpenAI" or (hasattr(client, "chat") and hasattr(client.chat, "completions")):
+            return self._wrap_openai(client)
+        elif cls_name == "Anthropic" or (hasattr(client, "messages") and hasattr(client.messages, "create")):
+            return self._wrap_anthropic(client)
+        elif cls_name == "GenerativeModel" or "generativeai" in module:
+            return self._wrap_gemini(client)
+        elif hasattr(client, "converse") and hasattr(client, "invoke_model"):
+            return self._wrap_bedrock(client)
+        else:
+            if not self.silent:
+                print(f"[Leap360] Warning: unknown client type '{cls_name}' — use trace_call() for manual tracing.")
+            return client
+
+    # ── OpenAI ────────────────────────────────────────────────────────────────
+
+    def _wrap_openai(self, client: Any) -> Any:
+        tracer = self
         original_create = client.chat.completions.create
 
         @wraps(original_create)
-        def patched_create(*args, **kwargs):
-            start_time = time.time()
-            run_id = run_id_var.get()
-            agent_name = agent_name_var.get()
-            
+        def patched_create(*args: Any, **kwargs: Any) -> Any:
+            agent_name = _agent_name_var.get()
+            tracer.check_kill_switch(agent_name)
+
+            start = time.time()
             response = None
             error = None
-            
             try:
                 response = original_create(*args, **kwargs)
                 return response
             except Exception as e:
-                error = e
-                raise e
+                error = str(e)
+                raise
             finally:
-                latency_ms = int((time.time() - start_time) * 1000)
-                
-                # Extract requested model and body
-                body = kwargs
-                if not body and args:
-                    body = args[0] if isinstance(args[0], dict) else {"content": str(args)}
-                elif not body:
-                    body = {}
-                    
-                model = body.get('model', 'unknown')
-                usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-                
-                response_dict = None
-                
-                if response:
-                    # Depending on if it's a Pydantic model (OpenAI v1) or dict
-                    response_dict = getattr(response, "model_dump", lambda: response)() if hasattr(response, "model_dump") else (response.__dict__ if hasattr(response, "__dict__") else response)
-                    
-                    if isinstance(response_dict, dict):
-                        model = response_dict.get('model', model)
-                        resp_usage = response_dict.get('usage', {})
-                        if resp_usage:
-                            usage = {
-                                "prompt_tokens": resp_usage.get('prompt_tokens', 0),
-                                "completion_tokens": resp_usage.get('completion_tokens', 0),
-                                "total_tokens": resp_usage.get('total_tokens', 0)
-                            }
-                
-                payload = {
-                    "project_id": self.project_id,
-                    "service_name": self.service_name,
-                    "agent_name": agent_name,
-                    "run_id": run_id or str(uuid.uuid4()),
-                    "provider": "openai",
-                    "model": model,
-                    "request": body,
-                    "response": response_dict,
-                    "latency_ms": latency_ms,
-                    "usage": usage,
-                    "timestamp": datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat(),
-                    "error": str(error) if error else None
-                }
-                
-                self._send_trace(payload)
+                latency_ms = int((time.time() - start) * 1000)
+                usage = getattr(response, "usage", None) or {}
+                tracer._post_trace_bg(
+                    run_id=_run_id_var.get() or str(uuid.uuid4()),
+                    agent_name=agent_name,
+                    provider="openai",
+                    model=kwargs.get("model") or (args[0] if args else "unknown"),
+                    request={"messages": kwargs.get("messages", []), "model": kwargs.get("model", "")},
+                    response=_safe_dict(response),
+                    latency_ms=latency_ms,
+                    usage={
+                        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or usage.get("prompt_tokens", 0) if isinstance(usage, dict) else getattr(usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(usage, "completion_tokens", 0) or usage.get("completion_tokens", 0) if isinstance(usage, dict) else getattr(usage, "completion_tokens", 0),
+                        "total_tokens": getattr(usage, "total_tokens", 0) or usage.get("total_tokens", 0) if isinstance(usage, dict) else getattr(usage, "total_tokens", 0),
+                    },
+                    error=error,
+                )
 
         client.chat.completions.create = patched_create
-        self._wrapped_client = client
         return client
 
-    def _send_trace(self, payload: dict):
-        url = f"{self.base_url}/v1/traces"
-        headers = {
-            "Content-Type": "application/json",
-            "x-leap360-key": self.api_key
-        }
-        
-        def post():
+    # ── Anthropic ─────────────────────────────────────────────────────────────
+
+    def _wrap_anthropic(self, client: Any) -> Any:
+        tracer = self
+        original_create = client.messages.create
+
+        @wraps(original_create)
+        def patched_create(*args: Any, **kwargs: Any) -> Any:
+            agent_name = _agent_name_var.get()
+            tracer.check_kill_switch(agent_name)
+
+            start = time.time()
+            response = None
+            error = None
             try:
-                requests.post(url, json=payload, headers=headers, timeout=5)
+                response = original_create(*args, **kwargs)
+                return response
             except Exception as e:
-                print(f"[Leap360] Error sending trace event: {e}")
-                
-        # Fire and forget
-        threading.Thread(target=post, daemon=True).start()
+                error = str(e)
+                raise
+            finally:
+                latency_ms = int((time.time() - start) * 1000)
+                usage = getattr(response, "usage", None) or {}
+                inp = getattr(usage, "input_tokens", 0) or (usage.get("input_tokens", 0) if isinstance(usage, dict) else 0)
+                out = getattr(usage, "output_tokens", 0) or (usage.get("output_tokens", 0) if isinstance(usage, dict) else 0)
+                tracer._post_trace_bg(
+                    run_id=_run_id_var.get() or str(uuid.uuid4()),
+                    agent_name=agent_name,
+                    provider="anthropic",
+                    model=kwargs.get("model", "unknown"),
+                    request={"messages": kwargs.get("messages", []), "model": kwargs.get("model", "")},
+                    response=_safe_dict(response),
+                    latency_ms=latency_ms,
+                    usage={"prompt_tokens": inp, "completion_tokens": out, "total_tokens": inp + out},
+                    error=error,
+                )
 
-    def create_agent(self, name: str):
-        class AgentRunContext:
-            def __init__(self, leap360_instance, agent_name):
-                self.instance = leap360_instance
-                self.agent_name = agent_name
-                
-            def run(self, fn):
-                run_id = str(uuid.uuid4())
-                
-                # We need to run inside the context
-                def run_with_context(*args, **kwargs):
-                    token_run = run_id_var.set(run_id)
-                    token_agent = agent_name_var.set(self.agent_name)
-                    try:
-                        # If fn takes 1 arg, pass the client
-                        import inspect
-                        sig = inspect.signature(fn)
-                        if len(sig.parameters) >= 1:
-                            return fn(self.instance._wrapped_client)
-                        return fn()
-                    finally:
-                        run_id_var.reset(token_run)
-                        agent_name_var.reset(token_agent)
-                        
-                return run_with_context()
+        client.messages.create = patched_create
+        return client
 
-        return AgentRunContext(self, name)
+    # ── Gemini ────────────────────────────────────────────────────────────────
+
+    def _wrap_gemini(self, model: Any) -> Any:
+        tracer = self
+        original_generate = model.generate_content
+
+        @wraps(original_generate)
+        def patched_generate(*args: Any, **kwargs: Any) -> Any:
+            agent_name = _agent_name_var.get()
+            tracer.check_kill_switch(agent_name)
+
+            start = time.time()
+            response = None
+            error = None
+            try:
+                response = original_generate(*args, **kwargs)
+                return response
+            except Exception as e:
+                error = str(e)
+                raise
+            finally:
+                latency_ms = int((time.time() - start) * 1000)
+                meta = getattr(getattr(response, "response", None), "usage_metadata", None) or {}
+                tracer._post_trace_bg(
+                    run_id=_run_id_var.get() or str(uuid.uuid4()),
+                    agent_name=agent_name,
+                    provider="google",
+                    model=getattr(model, "model_name", "gemini"),
+                    request={"prompt": args[0] if args else kwargs},
+                    response=_safe_dict(response),
+                    latency_ms=latency_ms,
+                    usage={
+                        "prompt_tokens": getattr(meta, "prompt_token_count", 0) or 0,
+                        "completion_tokens": getattr(meta, "candidates_token_count", 0) or 0,
+                        "total_tokens": getattr(meta, "total_token_count", 0) or 0,
+                    },
+                    error=error,
+                )
+
+        model.generate_content = patched_generate
+        return model
+
+    # ── AWS Bedrock ───────────────────────────────────────────────────────────
+
+    def _wrap_bedrock(self, client: Any) -> Any:
+        tracer = self
+        original_converse = client.converse
+
+        @wraps(original_converse)
+        def patched_converse(*args: Any, **kwargs: Any) -> Any:
+            agent_name = _agent_name_var.get()
+            tracer.check_kill_switch(agent_name)
+
+            start = time.time()
+            response = None
+            error = None
+            try:
+                response = original_converse(*args, **kwargs)
+                return response
+            except Exception as e:
+                error = str(e)
+                raise
+            finally:
+                latency_ms = int((time.time() - start) * 1000)
+                usage = (response or {}).get("usage", {})
+                tracer._post_trace_bg(
+                    run_id=_run_id_var.get() or str(uuid.uuid4()),
+                    agent_name=agent_name,
+                    provider="bedrock",
+                    model=kwargs.get("modelId", "unknown"),
+                    request={"messages": kwargs.get("messages", [])},
+                    response=response or {},
+                    latency_ms=latency_ms,
+                    usage={
+                        "prompt_tokens": usage.get("inputTokens", 0),
+                        "completion_tokens": usage.get("outputTokens", 0),
+                        "total_tokens": usage.get("totalTokens", 0),
+                    },
+                    error=error,
+                )
+
+        client.converse = patched_converse
+        return client
+
+    # ── Manual trace_call ─────────────────────────────────────────────────────
+
+    def trace_call(
+        self,
+        fn: Callable,
+        provider: str,
+        model: str,
+        agent_name: Optional[str] = None,
+        extract_usage: Optional[Callable] = None,
+    ) -> Any:
+        """
+        Manually trace any callable::
+
+            tracer.trace_call(
+                fn=lambda: my_llm.complete(prompt),
+                provider="mistral",
+                model="mistral-large-latest",
+            )
+        """
+        resolved_agent = agent_name or _agent_name_var.get()
+        self.check_kill_switch(resolved_agent)
+
+        start = time.time()
+        result = None
+        error = None
+        try:
+            result = fn()
+            return result
+        except Exception as e:
+            error = str(e)
+            raise
+        finally:
+            latency_ms = int((time.time() - start) * 1000)
+            usage = (
+                extract_usage(result)
+                if result is not None and extract_usage
+                else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            )
+            self._post_trace_bg(
+                run_id=_run_id_var.get() or str(uuid.uuid4()),
+                agent_name=resolved_agent,
+                provider=provider,
+                model=model,
+                request={},
+                response=_safe_dict(result) or {},
+                latency_ms=latency_ms,
+                usage=usage,
+                error=error,
+            )
+
+    # ── Agent context manager ─────────────────────────────────────────────────
+
+    def agent(self, name: str):
+        """
+        Context manager that tags all wrapped calls with an agent name::
+
+            with tracer.agent("Finance-Bot"):
+                response = client.chat.completions.create(...)
+        """
+        return _AgentContext(name)
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _post_trace_bg(self, **kwargs: Any) -> None:
+        """Fire-and-forget trace post in a daemon thread."""
+        t = threading.Thread(target=self._post_trace, kwargs=kwargs, daemon=True)
+        t.start()
+
+    def _post_trace(
+        self,
+        run_id: str,
+        agent_name: Optional[str],
+        provider: str,
+        model: str,
+        request: dict,
+        response: dict,
+        latency_ms: int,
+        usage: dict,
+        error: Optional[str],
+    ) -> None:
+        if not _HAS_REQUESTS:
+            return
+        payload = {
+            "project_id": self.project_id,
+            "service_name": self.service_name,
+            "agent_name": agent_name,
+            "run_id": run_id,
+            "provider": provider,
+            "model": model,
+            "request": request,
+            "response": response,
+            "latency_ms": latency_ms,
+            "usage": usage,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": error,
+        }
+        try:
+            _requests.post(
+                f"{self.base_url}/v1/traces",
+                json=payload,
+                headers={
+                    "x-leap360-key": self.api_key,
+                    "Content-Type": "application/json",
+                },
+                timeout=5,
+            )
+        except Exception as exc:
+            if not self.silent:
+                pass  # Silently ignore — tracing must never break the app
+
+
+# ─── Agent context manager helper ────────────────────────────────────────────
+
+class _AgentContext:
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._token_run: Any = None
+        self._token_agent: Any = None
+
+    def __enter__(self) -> "_AgentContext":
+        self._token_run = _run_id_var.set(str(uuid.uuid4()))
+        self._token_agent = _agent_name_var.set(self._name)
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        if self._token_run is not None:
+            _run_id_var.reset(self._token_run)
+        if self._token_agent is not None:
+            _agent_name_var.reset(self._token_agent)
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _safe_dict(obj: Any) -> dict:
+    """Convert an object to a plain dict for JSON serialization."""
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    try:
+        return json.loads(json.dumps(obj, default=str))
+    except Exception:
+        return {"__repr__": repr(obj)}
+
+
+# ─── Backwards-compatible alias ───────────────────────────────────────────────
+
+Leap360 = Leap360Tracer
+
+__all__ = ["Leap360Tracer", "Leap360"]

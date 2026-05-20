@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { fetchTraceDetail } from '../api';
+import { fetchTrace } from '../api';
 import { format } from 'date-fns';
 import { ArrowLeft, Database, Clock, Server, Fingerprint } from 'lucide-react';
 
@@ -12,10 +12,10 @@ export function TraceDetailView() {
     useEffect(() => {
         if (!traceId) return;
         setLoading(true);
-        fetchTraceDetail(traceId).then(data => {
+        fetchTrace(traceId).then((data: any) => {
             setTrace(data.data || data);
             setLoading(false);
-        }).catch(err => {
+        }).catch((err: unknown) => {
             console.error(err);
             setLoading(false);
         });

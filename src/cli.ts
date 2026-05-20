@@ -1,108 +1,135 @@
 #!/usr/bin/env node
 /**
- * leap360-sdk — CLI entry point
+ * leap360 CLI — local-only tooling
  *
  * Commands:
- *   leap360 login    — authenticate via your Leap360 dashboard (browser-based)
- *   leap360 logout   — remove saved credentials
- *   leap360 status   — show current login status
+ *   leap360 setup   — interactive setup: save API key + project ID to ~/.leap360/config.json
+ *   leap360 whoami  — print the saved config
+ *   leap360 clear   — remove saved credentials
  *   leap360 --version
  */
 
 import { Command } from 'commander';
-import { startDeviceAuth, pollForApproval, saveCredentials, loadCredentials, clearCredentials } from './auth.js';
+import * as readline from 'node:readline';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+
+const CONFIG_DIR = path.join(os.homedir(), '.leap360');
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+
+interface Config {
+    apiKey: string;
+    projectId: string;
+    serviceName: string;
+    baseUrl: string;
+}
+
+function loadConfig(): Config | null {
+    try {
+        const raw = fs.readFileSync(CONFIG_FILE, 'utf-8');
+        return JSON.parse(raw) as Config;
+    } catch {
+        return null;
+    }
+}
+
+function saveConfig(cfg: Config): void {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+}
+
+function question(rl: readline.Interface, prompt: string): Promise<string> {
+    return new Promise(resolve => rl.question(prompt, resolve));
+}
 
 const program = new Command();
 
 program
-  .name('leap360')
-  .description('Leap360 AI Governance SDK CLI')
-  .version('1.0.0');
+    .name('leap360')
+    .description('Leap360 AI Governance — local SDK tooling')
+    .version('1.0.0');
 
-// ─── Command: login ────────────────────────────────────────────────────────
+// ── setup ────────────────────────────────────────────────────────────────────
 program
-  .command('login')
-  .description('Log in to Leap360 and save your API key locally')
-  .action(async () => {
-    console.log('\n🔐  Leap360 Login\n');
+    .command('setup')
+    .description('Configure your local Leap360 API key and project settings')
+    .action(async () => {
+        console.log('\n�  Leap360 Setup\n');
+        console.log('   This saves your config to ~/.leap360/config.json');
+        console.log('   Your API key is the value of LEAP360_API_KEY in your .env\n');
 
-    // 1. Start device auth session
-    let session;
-    try {
-      session = await startDeviceAuth();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`\n❌  Could not reach the Leap360 cloud API.\n   ${msg}`);
-      console.error('\n   Make sure LEAP360_API_URL is set (see README).\n');
-      process.exit(1);
-    }
+        const existing = loadConfig();
 
-    // 2. Show user code & open browser
-    console.log(`   Opening your browser to:\n`);
-    console.log(`   ${session.verificationUrl}\n`);
-    console.log(`   Your verification code: \x1b[1;33m${session.userCode}\x1b[0m`);
-    console.log('\n   (Waiting for you to approve in the browser…)\n');
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+        });
 
-    // Dynamically import `open` (ESM package)
-    try {
-      const open = (await import('open')).default;
-      await open(session.verificationUrl);
-    } catch {
-      console.log('   [Could not open browser automatically — please paste the URL above manually]\n');
-    }
+        const apiKey = await question(
+            rl,
+            `   API key [${existing?.apiKey ?? 'leap360-dev-secret-key-change-me'}]: `
+        );
+        const projectId = await question(
+            rl,
+            `   Project ID [${existing?.projectId ?? '00000000-0000-0000-0000-000000000001'}]: `
+        );
+        const serviceName = await question(
+            rl,
+            `   Service name [${existing?.serviceName ?? 'my-service'}]: `
+        );
+        const baseUrl = await question(
+            rl,
+            `   API base URL [${existing?.baseUrl ?? 'http://localhost:4000'}]: `
+        );
 
-    // 3. Poll for approval
-    const result = await pollForApproval(session.deviceCode);
+        rl.close();
 
-    if (result.status === 'approved' && result.apiKey) {
-      saveCredentials({
-        apiKey: result.apiKey,
-        userId: result.userId!,
-        email:  result.email!,
-      });
-      console.log(`✅  Logged in as \x1b[1;32m${result.email}\x1b[0m`);
-      console.log(`   API key saved to ~/.leap360/config.json\n`);
-      console.log('   You can now use the SDK in your AI application:\n');
-      console.log('   \x1b[36mimport { Leap360Client } from \'leap360-sdk\';\x1b[0m');
-      console.log('   \x1b[36mconst leap = new Leap360Client();\x1b[0m\n');
-    } else if (result.status === 'expired') {
-      console.error('❌  Login timed out (10 minutes). Run `leap360 login` again.\n');
-      process.exit(1);
-    } else {
-      console.error('❌  Login was not approved. Try again.\n');
-      process.exit(1);
-    }
-  });
+        const cfg: Config = {
+            apiKey: apiKey.trim() || existing?.apiKey || 'leap360-dev-secret-key-change-me',
+            projectId: projectId.trim() || existing?.projectId || '00000000-0000-0000-0000-000000000001',
+            serviceName: serviceName.trim() || existing?.serviceName || 'my-service',
+            baseUrl: baseUrl.trim() || existing?.baseUrl || 'http://localhost:4000',
+        };
 
-// ─── Command: logout ───────────────────────────────────────────────────────
+        saveConfig(cfg);
+
+        console.log('\n✅  Config saved to', CONFIG_FILE);
+        console.log(`   API Key:     ${cfg.apiKey}`);
+        console.log(`   Project ID:  ${cfg.projectId}`);
+        console.log(`   Service:     ${cfg.serviceName}`);
+        console.log(`   Base URL:    ${cfg.baseUrl}`);
+        console.log('\n   Start the server:  pnpm dev  (in the project root)\n');
+    });
+
+// ── whoami ───────────────────────────────────────────────────────────────────
 program
-  .command('logout')
-  .description('Remove saved Leap360 credentials from this machine')
-  .action(() => {
-    const creds = loadCredentials();
-    if (!creds) {
-      console.log('\n⚠️  You are not logged in.\n');
-      return;
-    }
-    clearCredentials();
-    console.log(`\n✅  Logged out (removed credentials for ${creds.email}).\n`);
-  });
+    .command('whoami')
+    .description('Show saved Leap360 configuration')
+    .action(() => {
+        const cfg = loadConfig();
+        if (!cfg) {
+            console.log('\n❌  No config found. Run: leap360 setup\n');
+            process.exit(1);
+        }
+        console.log('\n📋  Leap360 config (~/.leap360/config.json):');
+        console.log(`   API Key:    ${cfg.apiKey}`);
+        console.log(`   Project ID: ${cfg.projectId}`);
+        console.log(`   Service:    ${cfg.serviceName}`);
+        console.log(`   Base URL:   ${cfg.baseUrl}\n`);
+    });
 
-// ─── Command: status ───────────────────────────────────────────────────────
+// ── clear ────────────────────────────────────────────────────────────────────
 program
-  .command('status')
-  .description('Show your current Leap360 login status')
-  .action(() => {
-    const creds = loadCredentials();
-    if (!creds) {
-      console.log('\n⚠️  Not logged in.  Run: \x1b[36mleap360 login\x1b[0m\n');
-      return;
-    }
-    console.log('\n✅  Logged in to Leap360\n');
-    console.log(`   Email:   ${creds.email}`);
-    console.log(`   User ID: ${creds.userId}`);
-    console.log(`   API Key: ${creds.apiKey.substring(0, 16)}…`);
-    console.log(`   Saved:   ${creds.savedAt}\n`);
-  });
+    .command('clear')
+    .description('Remove saved credentials')
+    .action(() => {
+        try {
+            fs.unlinkSync(CONFIG_FILE);
+            console.log('\n🗑️   Credentials cleared.\n');
+        } catch {
+            console.log('\nNo credentials found.\n');
+        }
+    });
 
-program.parse(process.argv);
+program.parse();

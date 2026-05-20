@@ -1,34 +1,7 @@
 version: "3.9"
 
+# Leap360 — local-first stack (SQLite, no Postgres/Redis required)
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: leap360-postgres
-    environment:
-      POSTGRES_USER: leap360
-      POSTGRES_PASSWORD: leap360pass
-      POSTGRES_DB: leap360
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U leap360"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: leap360-redis
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   api:
     build:
       context: ./api
@@ -37,34 +10,15 @@ services:
     ports:
       - "4000:4000"
     environment:
-      DATABASE_URL: postgresql://leap360:leap360pass@postgres:5432/leap360
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: file:/data/leap360.db
       LEAP360_API_KEY: ${LEAP360_API_KEY:-leap360-dev-secret-key-change-me}
       SEED_PROJECT_ID: ${SEED_PROJECT_ID:-00000000-0000-0000-0000-000000000001}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@leap360.ai}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       PORT: 4000
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    volumes:
+      - sqlite_data:/data
     command: sh -c "npx prisma migrate deploy && node dist/seed.js && node dist/server.js"
-
-  worker:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    container_name: leap360-worker
-    environment:
-      DATABASE_URL: postgresql://leap360:leap360pass@postgres:5432/leap360
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: node dist/worker.js
 
   web:
     build:
@@ -79,4 +33,4 @@ services:
       - api
 
 volumes:
-  postgres_data:
+  sqlite_data:

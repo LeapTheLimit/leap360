@@ -1,22 +1,28 @@
-// This is your Prisma schema file
+// Leap360 — local SQLite schema (no PostgreSQL / Redis required)
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
+
+// ─── Core ─────────────────────────────────────────────────────────────────────
 
 model Project {
   id          String       @id @default(uuid())
   name        String
   apiKeyHash  String       @map("api_key_hash")
+  status      String       @default("ACTIVE") // ACTIVE | SUSPENDED
   createdAt   DateTime     @default(now()) @map("created_at")
   services    Service[]
   agents      Agent[]
   traces      TraceEvent[]
+  policies    Policy[]
+  violations  Violation[]
+  killSwitches KillSwitch[]
 
   @@map("projects")
 }
@@ -26,7 +32,7 @@ model Service {
   projectId   String       @map("project_id")
   name        String
   firstSeenAt DateTime     @default(now()) @map("first_seen_at")
-  lastSeenAt  DateTime     @default(now()) @updatedAt @map("last_seen_at")
+  lastSeenAt  DateTime     @default(now()) @map("last_seen_at")
   project     Project      @relation(fields: [projectId], references: [id])
   agents      Agent[]
   traces      TraceEvent[]
@@ -40,37 +46,93 @@ model Agent {
   projectId   String       @map("project_id")
   serviceId   String       @map("service_id")
   name        String
+  status      String       @default("ACTIVE") // ACTIVE | SUSPENDED
   firstSeenAt DateTime     @default(now()) @map("first_seen_at")
-  lastSeenAt  DateTime     @default(now()) @updatedAt @map("last_seen_at")
+  lastSeenAt  DateTime     @default(now()) @map("last_seen_at")
   project     Project      @relation(fields: [projectId], references: [id])
   service     Service      @relation(fields: [serviceId], references: [id])
   traces      TraceEvent[]
+  violations  Violation[]
 
   @@unique([projectId, serviceId, name])
   @@map("agents")
 }
 
 model TraceEvent {
-  id               String    @id @default(uuid())
-  projectId        String    @map("project_id")
-  serviceId        String    @map("service_id")
-  agentId          String?   @map("agent_id")
-  runId            String    @map("run_id")
+  id               String      @id @default(uuid())
+  projectId        String      @map("project_id")
+  serviceId        String      @map("service_id")
+  agentId          String?     @map("agent_id")
+  runId            String      @map("run_id")
   provider         String
   model            String
-  requestJson      Json      @map("request_json")
-  responseJson     Json      @map("response_json")
-  latencyMs        Int       @map("latency_ms")
-  promptTokens     Int       @map("prompt_tokens")
-  completionTokens Int       @map("completion_tokens")
-  totalTokens      Int       @map("total_tokens")
+  requestJson      String      @map("request_json")   // stored as JSON string (SQLite has no JSON type)
+  responseJson     String      @map("response_json")
+  latencyMs        Int         @map("latency_ms")
+  promptTokens     Int         @map("prompt_tokens")
+  completionTokens Int         @map("completion_tokens")
+  totalTokens      Int         @map("total_tokens")
   timestamp        DateTime
   error            String?
-  project          Project   @relation(fields: [projectId], references: [id])
-  service          Service   @relation(fields: [serviceId], references: [id])
-  agent            Agent?    @relation(fields: [agentId], references: [id])
+  project          Project     @relation(fields: [projectId], references: [id])
+  service          Service     @relation(fields: [serviceId], references: [id])
+  agent            Agent?      @relation(fields: [agentId], references: [id])
+  violations       Violation[]
 
   @@index([projectId, serviceId])
   @@index([projectId, timestamp])
   @@map("trace_events")
+}
+
+// ─── Governance ───────────────────────────────────────────────────────────────
+
+// Kill-switch state — one row per project (global) or per agent name
+model KillSwitch {
+  id         String   @id @default(uuid())
+  projectId  String   @map("project_id")
+  agentName  String   @default("") @map("agent_name")  // "" = global kill switch, otherwise agent name
+  status     String   @default("ACTIVE")   // ACTIVE | SUSPENDED
+  reason     String?
+  updatedAt  DateTime @default(now()) @map("updated_at")
+  project    Project  @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, agentName])
+  @@map("kill_switches")
+}
+
+// Governance policies (e.g. "No PII", "Max tokens", "Profanity filter")
+model Policy {
+  id          String      @id @default(uuid())
+  projectId   String      @map("project_id")
+  name        String
+  description String?
+  severity    String      @default("medium")  // low | medium | high | critical
+  action      String      @default("log")     // log | block
+  enabled     Boolean     @default(true)
+  rules       String      @default("[]")      // JSON array of rule strings
+  createdAt   DateTime    @default(now()) @map("created_at")
+  project     Project     @relation(fields: [projectId], references: [id])
+  violations  Violation[]
+
+  @@map("policies")
+}
+
+// Recorded policy violations
+model Violation {
+  id          String      @id @default(uuid())
+  projectId   String      @map("project_id")
+  traceId     String?     @map("trace_id")
+  agentId     String?     @map("agent_id")
+  policyId    String      @map("policy_id")
+  severity    String      @default("medium")
+  description String
+  status      String      @default("open")  // open | investigating | resolved
+  resolvedAt  DateTime?   @map("resolved_at")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  project     Project     @relation(fields: [projectId], references: [id])
+  trace       TraceEvent? @relation(fields: [traceId], references: [id])
+  agent       Agent?      @relation(fields: [agentId], references: [id])
+  policy      Policy      @relation(fields: [policyId], references: [id])
+
+  @@map("violations")
 }

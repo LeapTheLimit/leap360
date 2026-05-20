@@ -1,89 +1,46 @@
 /**
- * leap360-sdk — auth helpers
- * Implements the Device Authorization Grant flow for CLI login.
+ * leap360 — local auth helpers
  *
- * Flow:
- *  1. startDeviceAuth()   → get deviceCode + verificationUrl from cloud API
- *  2. (CLI opens browser with verificationUrl)
- *  3. pollForApproval()   → poll cloud API until user approves in browser
- *  4. saveCredentials()   → write apiKey to ~/.leap360/config.json
+ * All auth is local-only: credentials are read/written to
+ * ~/.leap360/config.json.  No cloud device-flow, no Cognito.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CLOUD_API_URL, CREDENTIALS_PATH, type Credentials } from './config.js';
+import * as os from 'os';
 
-// ─── Device Auth ──────────────────────────────────────────────────────────
+// ─── Paths ────────────────────────────────────────────────────────────────────
 
-export interface DeviceAuthResponse {
-  deviceCode: string;
-  userCode: string;
-  verificationUrl: string;
-  expiresIn: number;
+export const CONFIG_DIR  = path.join(os.homedir(), '.leap360');
+export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface Credentials {
+  apiKey:      string;
+  projectId:   string;
+  serviceName: string;
+  baseUrl:     string;
+  savedAt?:    string;
 }
 
-export interface PollResponse {
-  status: 'pending' | 'approved' | 'expired';
-  apiKey?: string;
-  userId?: string;
-  email?: string;
-}
+// ─── Read / Write ─────────────────────────────────────────────────────────────
 
-/** Step 1: Ask the cloud API to create a device auth session */
-export async function startDeviceAuth(): Promise<DeviceAuthResponse> {
-  const res = await fetch(`${CLOUD_API_URL}/v1/auth/device/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Failed to start device auth: ${res.status} — ${err}`);
-  }
-
-  return res.json() as Promise<DeviceAuthResponse>;
-}
-
-/** Step 3: Poll until the user approves or the session expires */
-export async function pollForApproval(
-  deviceCode: string,
-  intervalMs = 3000,
-  timeoutMs  = 600_000
-): Promise<PollResponse> {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    await sleep(intervalMs);
-
-    const res = await fetch(`${CLOUD_API_URL}/v1/auth/device/poll?deviceCode=${encodeURIComponent(deviceCode)}`);
-    if (!res.ok) continue;
-
-    const data = (await res.json()) as PollResponse;
-    if (data.status !== 'pending') return data;
-  }
-
-  return { status: 'expired' };
-}
-
-// ─── Credentials ─────────────────────────────────────────────────────────
-
-/** Save credentials to ~/.leap360/config.json */
+/** Save credentials to ~/.leap360/config.json (mode 600) */
 export function saveCredentials(creds: Omit<Credentials, 'savedAt'>): void {
-  const dir = path.dirname(CREDENTIALS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
 
   const full: Credentials = { ...creds, savedAt: new Date().toISOString() };
-  fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(full, null, 2), { mode: 0o600 });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(full, null, 2), { mode: 0o600 });
 }
 
 /** Load credentials from ~/.leap360/config.json, or null if not found */
 export function loadCredentials(): Credentials | null {
   try {
-    if (!fs.existsSync(CREDENTIALS_PATH)) return null;
-    const raw  = fs.readFileSync(CREDENTIALS_PATH, 'utf-8');
+    if (!fs.existsSync(CONFIG_FILE)) return null;
+    const raw  = fs.readFileSync(CONFIG_FILE, 'utf-8');
     const data = JSON.parse(raw) as Credentials;
-    if (!data.apiKey || !data.userId) return null;
+    if (!data.apiKey) return null;
     return data;
   } catch {
     return null;
@@ -92,10 +49,5 @@ export function loadCredentials(): Credentials | null {
 
 /** Delete saved credentials */
 export function clearCredentials(): void {
-  if (fs.existsSync(CREDENTIALS_PATH)) fs.unlinkSync(CREDENTIALS_PATH);
-}
-
-// ─── Utility ─────────────────────────────────────────────────────────────
-function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
 }

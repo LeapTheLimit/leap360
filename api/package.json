@@ -6,9 +6,7 @@
         "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
         "build": "tsc",
         "start": "node dist/server.js",
-        "worker": "node dist/worker.js",
-        "worker:dev": "ts-node-dev --respawn --transpile-only src/worker.ts",
-        "migrate": "prisma migrate dev",
+        "migrate": "prisma migrate dev --name init",
         "migrate:deploy": "prisma migrate deploy",
         "seed": "ts-node src/seed.ts",
         "seed:built": "node dist/seed.js",
@@ -17,9 +15,9 @@
     "dependencies": {
         "@fastify/cors": "^9.0.1",
         "@prisma/client": "^5.10.2",
-        "crypto": "^1.0.1",
         "dotenv": "^16.4.5",
         "fastify": "^4.26.2",
+        "pino-pretty": "^13.0.0",
         "uuid": "^9.0.1",
         "zod": "^3.22.4"
     },

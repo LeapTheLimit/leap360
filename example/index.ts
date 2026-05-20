@@ -47,10 +47,11 @@ async function runDemo() {
 
     console.log('\nSending a batch of customer support traces...');
     for (const text of prompts) {
-        await customerSupportAgent.run(async (client) => {
+        // agent.run() takes no parameters — the wrapped openai is already in scope
+        await customerSupportAgent.run(async () => {
             try {
                 console.log(`> Sending: ${text}`);
-                await client.chat.completions.create({
+                await openai.chat.completions.create({
                     model: 'gpt-4',
                     messages: [
                         { role: 'system', content: 'You are a helpful customer support assistant for Leap360 Store.' },

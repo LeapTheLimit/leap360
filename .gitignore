@@ -8,7 +8,7 @@ node_modules/
 
 # production
 /build
-/dist
+dist/
 
 # misc
 .DS_Store
@@ -21,6 +21,18 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# lock files (use pnpm-lock.yaml at root)
+package-lock.json
+yarn.lock
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
+# Prisma migrations generated locally (keep schema, ignore auto-migrations)
+# api/prisma/migrations/
 
 # Docker
 .dockerignore

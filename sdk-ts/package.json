@@ -1,18 +1,46 @@
 {
-    "name": "@leap360/sdk",
-    "version": "1.0.0",
-    "description": "Leap360 Agent Control Plane TypeScript SDK",
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "scripts": {
-        "build": "tsc",
-        "dev": "tsc -w"
-    },
-    "dependencies": {
-        "openai": "^4.28.0"
-    },
-    "devDependencies": {
-        "@types/node": "^20.11.20",
-        "typescript": "^5.3.3"
+  "name": "@leap360/sdk",
+  "version": "1.0.0",
+  "description": "TypeScript/JavaScript SDK for Leap360 local AI governance — tracing, kill-switch, policy enforcement.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     }
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ai",
+    "governance",
+    "tracing",
+    "llm",
+    "observability",
+    "openai",
+    "anthropic",
+    "gemini",
+    "leap360"
+  ],
+  "author": "Leap360 Contributors",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1"
+  }
 }

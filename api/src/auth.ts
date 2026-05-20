@@ -2,7 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import * as crypto from "crypto";
 import { FastifyRequest, FastifyReply } from "fastify";
 
-const prisma = new PrismaClient();
+export const prisma = new PrismaClient();
 
 // Cache project lookups to avoid hitting DB on every request
 const projectCache = new Map<string, { id: string; name: string }>();
@@ -11,13 +11,20 @@ export async function authPreHandler(
     request: FastifyRequest,
     reply: FastifyReply
 ) {
-    const apiKey = request.headers["x-leap360-key"] as string | undefined;
+    const apiKey =
+        (request.headers["x-leap360-key"] as string | undefined) ||
+        (request.headers["authorization"] as string | undefined)?.replace(
+            /^Bearer\s+/i,
+            ""
+        );
 
     if (!apiKey) {
-        return reply.code(401).send({ error: "Missing x-leap360-key header" });
+        return reply
+            .code(401)
+            .send({ error: "Missing x-leap360-key header or Authorization bearer token" });
     }
 
-    // Check cache first
+    // Cache hit
     if (projectCache.has(apiKey)) {
         (request as any).project = projectCache.get(apiKey);
         return;
@@ -37,5 +44,3 @@ export async function authPreHandler(
     projectCache.set(apiKey, project);
     (request as any).project = project;
 }
-
-export { prisma };
