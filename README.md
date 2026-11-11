@@ -1,273 +1,100 @@
-# Leap360 — Open-Source AI Governance SDK
+<div align="center">
 
-> Real-time observability, kill-switch controls, policy enforcement, and violation tracking for your AI applications — **fully local, zero cloud dependency**.
+# Leap360 AI
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-v18%2B-green)](https://nodejs.org)
-[![pnpm](https://img.shields.io/badge/pnpm-workspace-orange)](https://pnpm.io)
+**Access control for AI agents.** Check every tool call before it runs.
 
----
+[![npm](https://img.shields.io/npm/v/leap360?label=npm&color=1f6feb)](https://www.npmjs.com/package/leap360)
+[![PyPI](https://img.shields.io/pypi/v/leap360?label=PyPI&color=1f6feb)](https://pypi.org/project/leap360)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![npm downloads](https://img.shields.io/npm/dm/leap360?color=555)](https://www.npmjs.com/package/leap360)
 
-## ✨ What is Leap360?
+[Website](https://leap360.ai) · [Console](https://leap360.ai/dashboard) · [Pricing](https://leap360.ai/pricing) · [TypeScript docs](typescript/README.md) · [Python docs](python/README.md)
 
-Leap360 is an **open-source AI governance platform** that lets you:
-
-- 📡 **Trace every LLM call** — provider, model, tokens, latency, cost
-- 🔴 **Kill Switch** — instantly suspend all AI calls (global or per-agent)
-- 🛡️ **Policy Enforcement** — define rules that block or log violations at runtime
-- 🚨 **Violation Log** — full history of policy breaches with severity and status
-- 📊 **Web Dashboard** — built-in React UI at `http://localhost:5173`
-
-Everything runs **on your machine** using SQLite — no Postgres, no Redis, no cloud account required.
+</div>
 
 ---
 
-## 🚀 Quick Start (< 5 minutes)
+AI agents can send email, issue refunds, write to databases and deploy code. Leap360 sits between your agent and its tools and decides, before each call runs, whether to **allow** it, **hold** it for a person to approve, or **block** it. One press of **Stop all** halts every agent in the project.
 
-### Prerequisites
-
-- **Node.js** v18+
-- **pnpm** — `npm i -g pnpm`
-
-### 1. Clone
-
-```bash
-git clone https://github.com/LeapTheLimit/LEAP360-SDK.git
-cd LEAP360-SDK
-pnpm install
+```mermaid
+flowchart LR
+    A[Your agent] -->|tool call| L{Leap360 SDK}
+    L -->|safe| T[Tool runs]
+    L -->|risky| H[Held for a person] -->|approved| T
+    L -->|destructive| B[Blocked]
+    C[Console: rules, approvals, Stop all] -.-> L
 ```
 
-### 2. Configure
+## Why Leap360
+
+- **Actions, not just prompts.** Guardrails read text; Leap360 checks what the agent is about to *do*.
+- **Fast.** Calls your rules allow are decided in your process from cached rules, in about a millisecond.
+- **Safe to adopt.** New projects start in **Watch mode**: you see what your rules would do before anything is blocked.
+- **A person in the loop.** Risky calls wait for approval in the console or Slack.
+- **Works with your stack.** OpenAI Agents SDK, LangGraph, CrewAI, Vercel AI SDK, MCP servers and your own code.
+
+## Install
+
+| Language | Package | Install |
+| --- | --- | --- |
+| TypeScript / JavaScript | [`leap360`](https://www.npmjs.com/package/leap360) | `npm install leap360` |
+| Python | [`leap360`](https://pypi.org/project/leap360) | `pip install leap360` |
+
+Get an API key at [leap360.ai](https://leap360.ai) and set it as an environment variable:
 
 ```bash
-cp .env.example .env
-# The defaults work out of the box — no changes needed for local dev
+export LEAP360_API_KEY=your_key
 ```
 
-### 3. Initialize the Database
+## Quick start
 
-```bash
-pnpm migrate   # creates api/prisma/dev.db (SQLite)
-pnpm seed      # adds a default project + API key
-```
+**TypeScript**
 
-### 4. Start
-
-```bash
-pnpm dev
-```
-
-| Service | URL |
-|---------|-----|
-| API | http://localhost:4000 |
-| Dashboard | http://localhost:5173 |
-
-### 5. Send a Test Trace
-
-```bash
-cd example
-pnpm install
-pnpm start
-```
-
-Open the dashboard — you'll see your first trace appear in real time.
-
----
-
-## 📦 SDK Usage
-
-### TypeScript / JavaScript
-
-```bash
-npm install leap360
-# or: pnpm add leap360
-```
-
-```typescript
+```ts
 import { Leap360 } from 'leap360';
 
-const leap = new Leap360({
-  apiKey:      'leap360-dev-secret-key-change-me',
-  projectId:   '00000000-0000-0000-0000-000000000001',
-  serviceName: 'my-service',
-  baseUrl:     'http://localhost:4000',   // your local server
-});
+const leap = new Leap360({ apiKey: process.env.LEAP360_API_KEY, serviceName: 'support-bot' });
 
-// Wrap any supported client
-const openai = leap.wrapOpenAI(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }));
-
-const response = await openai.chat.completions.create({
-  model: 'gpt-4o',
-  messages: [{ role: 'user', content: 'Hello!' }],
-});
+// Wrap any function your agent can call as a tool
+const refund = leap.wrapTool('refund_customer', async (args) => realRefund(args));
 ```
 
-### Python
-
-```bash
-pip install leap360
-```
+**Python**
 
 ```python
-from leap360 import Leap360Tracer
-from openai import OpenAI
+from leap360 import Leap360Governor
 
-tracer = Leap360Tracer(
-    api_key="leap360-dev-secret-key-change-me",
-    project_id="00000000-0000-0000-0000-000000000001",
-    service_name="my-service",
-    base_url="http://localhost:4000",
-)
+leap = Leap360Governor(agent_name="support-bot")  # reads LEAP360_API_KEY
 
-client = tracer.wrap(OpenAI())
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)
+@leap.wrap_tool("refund_customer")
+def refund_customer(order_id: str, amount: float):
+    ...
 ```
 
-### Supported Providers
+Run your agent once and its calls appear in the console under **Live activity**. When you are happy with what Watch mode shows, turn on blocking.
 
-| Provider | TypeScript | Python |
-|----------|-----------|--------|
-| OpenAI | `leap.wrapOpenAI(client)` | `tracer.wrap(OpenAI())` |
-| Anthropic | `leap.wrapAnthropic(client)` | `tracer.wrap(Anthropic())` |
-| Google Gemini | `leap.wrapGoogleGenAI(client)` | `tracer.wrap(genai_client)` |
-| AWS Bedrock | — | `tracer.wrap(boto3_bedrock_client)` |
-| Any other | `leap.traceCall(fn, opts)` | `tracer.trace_call(fn=..., provider=..., model=...)` |
+**Using a coding agent?** Paste the setup prompt from the console into Claude Code, Cursor or Codex and it wraps your tools for you.
 
----
+## MCP servers
 
-## 🔴 Kill Switch
-
-Stop all AI calls instantly — from the dashboard or via API:
+Put any MCP server behind Leap360 without changing its code:
 
 ```bash
-# Suspend the entire project
-curl -X POST http://localhost:4000/v1/projects/{projectId}/killswitch \
-  -H "x-leap360-key: leap360-dev-secret-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"status":"SUSPENDED","reason":"Security incident"}'
-
-# Suspend a single agent
-curl -X POST http://localhost:4000/v1/projects/{projectId}/killswitch/agents/finance-bot \
-  -H "x-leap360-key: leap360-dev-secret-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"status":"SUSPENDED","reason":"Anomaly detected"}'
+npx -y leap360 mcp-proxy --agent claude-code -- npx -y @modelcontextprotocol/server-github
 ```
 
-When suspended, any SDK call immediately throws:
-```
-[Leap360] KILL_SWITCH_ACTIVE: Project is SUSPENDED — reason: Security incident
-```
-
----
-
-## 🛡️ Policy Enforcement
-
-Create a policy (from the dashboard or API):
-
-```bash
-curl -X POST http://localhost:4000/v1/projects/{projectId}/policies \
-  -H "x-leap360-key: leap360-dev-secret-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "No PII",
-    "description": "Block responses containing personal identifiable information",
-    "severity": "high",
-    "action": "block",
-    "rules": ["detect_pii", "block_ssn", "block_credit_card"]
-  }'
-```
-
-Policy actions:
-- `"block"` — throws an error before the response reaches your code
-- `"log"` — records the violation but allows the response through
-
----
-
-## 🖥️ Dashboard Pages
-
-| Page | Path | Description |
-|------|------|-------------|
-| Services | `/services` | All registered services + trace counts |
-| Traces | `/services/:id/traces` | Per-service LLM call history |
-| Violations | `/violations` | Policy breach log with severity & status |
-| Policies | `/policies` | Create, edit, enable/disable governance rules |
-| Kill Switch | `/killswitch` | Global + per-agent emergency stop controls |
-
----
-
-## 🏗️ Architecture
+## Repository layout
 
 ```
-LEAP360-SDK/
-├── api/            # Fastify REST API (SQLite via Prisma ORM)
-│   ├── prisma/     # schema.prisma + migrations + dev.db
-│   └── src/
-│       ├── routes/ # traces, services, killswitch, policies, violations
-│       └── server.ts
-├── web/            # React + Vite dashboard (Tailwind CSS)
-│   └── src/pages/
-├── sdk-ts/         # TypeScript SDK source
-├── sdk-py/         # Python SDK source
-├── src/            # CLI  (npx leap360 setup | whoami | clear)
-└── example/        # Runnable demo
+typescript/   npm package "leap360" (SDK, CLI, MCP proxy)
+python/       PyPI package "leap360"
 ```
 
-### Data Flow
+## Contributing
 
-```
-Your App  →  SDK  →  POST /v1/traces  →  SQLite  →  Dashboard
-                 ↘  GET  /v1/killswitch  (checked before every call)
-```
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). To report a security problem, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 
-No data ever leaves your machine. Your LLM API keys go **directly** to the provider — not through Leap360.
+## License
 
----
-
-## � Default Credentials
-
-These are set in `.env` and seeded into the local database automatically:
-
-| Setting | Default Value |
-|---------|--------------|
-| API Key | `leap360-dev-secret-key-change-me` |
-| Project ID | `00000000-0000-0000-0000-000000000001` |
-| API Port | `4000` |
-| Dashboard Port | `5173` |
-
-> **Change the API key** before exposing the server on a shared network.
-
----
-
-## 🛠️ CLI
-
-```bash
-npx leap360 setup    # interactive config → ~/.leap360/config.json
-npx leap360 whoami   # print current config
-npx leap360 clear    # remove saved config
-```
-
----
-
-## 📖 Full Documentation
-
-- [HowToRun.md](./HowToRun.md) — Step-by-step setup guide
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — How to contribute
-- [sdk-ts README](./sdk-ts/README.md) — TypeScript SDK reference  
-- [sdk-py README](./sdk-py/README.md) — Python SDK reference
-
----
-
-## 🤝 Contributing
-
-Pull requests are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
----
-
-## 📜 License
-
-[Apache 2.0](./LICENSE) © 2026 Leap360
+[Apache-2.0](LICENSE) © LeapTheLimit
