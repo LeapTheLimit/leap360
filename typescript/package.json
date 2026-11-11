@@ -1,0 +1,76 @@
+{
+  "name": "leap360",
+  "version": "1.11.0",
+  "description": "Access control for AI agents: check every tool call before it runs. Allow, hold for a person, block, or stop all. Works with OpenAI, Anthropic, Bedrock, Gemini, MCP and any LLM.",
+  "homepage": "https://leap360.ai",
+  "bugs": { "email": "sales@leap360.ai" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./scan": {
+      "import": "./dist/scan.js",
+      "types": "./dist/scan.d.ts"
+    },
+    "./receipts": {
+      "import": "./dist/receipts.js",
+      "types": "./dist/receipts.d.ts"
+    }
+  },
+  "bin": {
+    "leap360": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/make-executable.js",
+    "build:watch": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "test": "node dist/cli.js --version",
+    "test:unit": "node --test \"test/**/*.test.mjs\""
+  },
+  "keywords": [
+    "ai",
+    "governance",
+    "monitoring",
+    "tracing",
+    "llm",
+    "agents",
+    "observability",
+    "openai",
+    "gemini",
+    "anthropic",
+    "mistral",
+    "google-genai",
+    "aws-bedrock",
+    "bedrock",
+    "ai-safety",
+    "kill-switch",
+    "access-control",
+    "agent-security",
+    "mcp",
+    "policy-enforcement",
+    "leap360"
+  ],
+  "author": "Leap360",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@babel/parser": "^7.29.9",
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@babel/types": "^7.29.8",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ]
+}

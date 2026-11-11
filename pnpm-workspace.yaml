@@ -1,5 +1,0 @@
-packages:
-  - "api"
-  - "sdk-ts"
-  - "web"
-  - "example"
