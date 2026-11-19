@@ -97,4 +97,4 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). To
 
 ## License
 
-[Apache-2.0](LICENSE) © LeapTheLimit
+[Apache-2.0](LICENSE) © 2026 LeapTheLimit
