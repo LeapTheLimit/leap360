@@ -43,17 +43,30 @@ import threading
 class Leap360Tracer:
     _warned_unknown_key = False
 
-    def __init__(self, api_key=None, service_name="python-sdk", project_id="default", capture=None):
-        from .privacy import capture_level
-        self.api_key = api_key or self._load_api_key()
+    def __init__(self, api_key=None, service_name="python-sdk", project_id="default", capture=None, end_user_id=None, local=None):
+        from .privacy import explicit_capture
+        from .local import is_local, local_store
+        # Local mode (local=True or LEAP360_LOCAL=1): traces go to activity.jsonl on this device, no API key needed
+        self._store = local_store() if (is_local() if local is None else local) else None
+        self.api_key = "local" if self._store else api_key or self._load_api_key()
         # What leaves this process (issue #50): 'metadata' (default), 'redacted' or 'full'. See leap360.privacy.
-        self.capture = capture_level(capture)
+        # Unset: follow the project's setting in the console, learned from the API's answers.
+        self._explicit_capture = explicit_capture(capture)
+        self._project_capture = None
+        # A function returning your own id for the end user of a call, so their data can be deleted from the console
+        self.end_user_id = end_user_id
         self.service_name = service_name
         self.project_id = project_id
         self.api_url = os.environ.get(
             "LEAP360_API_URL",
             "https://b0vyk178b7.execute-api.us-east-1.amazonaws.com"
         )
+
+    @property
+    def capture(self):
+        if self._store:
+            return self._explicit_capture or self._store.rules()["capture"]
+        return self._explicit_capture or self._project_capture or "metadata"
 
     def _load_api_key(self):
         """Loads the Leap360 API key from environment variables or local CLI config."""
@@ -91,8 +104,18 @@ class Leap360Tracer:
         """Send trace in a background thread — never blocks the LLM call."""
         if not self.api_key:
             return  # Silent drop if not authenticated
-        from .privacy import trace_at_capture
+        from .privacy import trace_at_capture, project_capture
         payload = trace_at_capture(payload, self.capture)
+        try:
+            eu = self.end_user_id() if callable(self.end_user_id) else None
+        except Exception:
+            eu = None
+        if isinstance(eu, str) and eu:
+            payload["end_user_id"] = eu[:200]
+        if self._store:
+            self._store.log({"kind": "trace", **payload})
+            return
+        tracer = self
 
         def _post():
             try:
@@ -106,6 +129,14 @@ class Leap360Tracer:
                     json=payload,
                     timeout=5,
                 )
+                # Follow the project's setting from the console (issue #50)
+                if res.ok:
+                    try:
+                        cap = project_capture(res.json().get("capture"))
+                        if cap:
+                            tracer._project_capture = cap
+                    except ValueError:
+                        pass
                 # An unknown key is a setup mistake, not a transient error: say so once
                 if res.status_code == 401 and not Leap360Tracer._warned_unknown_key:
                     Leap360Tracer._warned_unknown_key = True

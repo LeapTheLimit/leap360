@@ -217,3 +217,28 @@ test('unused risky capabilities become a hold suggestion, unless a policy alread
   const rep = summarizeActions([], [], { start: '2026-10-01T00:00:00.000Z', end: '2026-10-02T00:00:00.000Z' }, caps);
   assert.equal(rep.capabilities[0].neverUsed, 1);
 });
+
+test('look-alike, invisible and command-substituted disguises are scored like the plain command', () => {
+  const fw = String.fromCharCode(0xff32, 0xff2f, 0xff30); // full-width R O P
+  const zw = String.fromCharCode(0x200b); // zero-width space
+  const cases = [
+    [{ name: 'execute_sql', args: { query: `D${fw} TABLE users` } }, 'db.destructive'],
+    [{ name: 'run_command', args: { command: `r${zw}m -rf /` } }, 'fs.delete'],
+    [{ name: 'run_command', args: { command: 'bash -c "$(echo cm0gLXJmIC8= | base64 -d)"' } }, 'shell.exec'],
+    [{ name: 'run_command', args: { command: 'eval `echo cm0gLXJmIC8= | base64 --decode`' } }, 'shell.exec'],
+  ];
+  for (const [call, category] of cases) {
+    const a = classifyAction(call);
+    assert.equal(a.risk, 'critical', `${JSON.stringify(call)} scored ${a.risk} (${a.reasons.join('; ')})`);
+    assert.equal(a.category, category, JSON.stringify(call));
+  }
+  // An invisible character in the tool name changes nothing
+  assert.deepEqual(classifyAction({ name: `delete${zw}_file`, args: { path: '/tmp/x' } }).risk, classifyAction({ name: 'delete_file', args: { path: '/tmp/x' } }).risk);
+  // Ordinary text with accents or emoji is not changed into a finding
+  assert.equal(classifyAction({ name: 'post_message', args: { text: 'Café ready ✅' } }).risk === 'critical', false);
+});
+
+test('a multi-megabyte argument is classified without crashing', () => {
+  const a = classifyAction({ name: 'upload_blob', args: { data: 'a'.repeat(10_000_000) } });
+  assert.ok(a.category);
+});

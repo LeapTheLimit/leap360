@@ -6,7 +6,10 @@
  */
 
 /** The deployed Cloud API URL — override with LEAP360_API_URL env var if needed */
-export const CLOUD_API_URL = (typeof process !== 'undefined' && process.env['LEAP360_API_URL']) || 'https://9ol8if3g4e.execute-api.us-east-1.amazonaws.com';
+export const CLOUD_API_URL =
+  (typeof process !== 'undefined' && /^(1|true|yes|on)$/i.test(process.env['LEAP360_LOCAL'] ?? '') && 'local')
+  || (typeof process !== 'undefined' && process.env['LEAP360_API_URL'])
+  || 'https://9ol8if3g4e.execute-api.us-east-1.amazonaws.com';
 
 /** Path to the local credentials file - resolved at runtime for cross-platform support */
 export const getCredentialsPath = (): string => {

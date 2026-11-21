@@ -52,8 +52,9 @@
 import { loadCredentials } from './auth.js';
 import { CLOUD_API_URL } from './config.js';
 import { Governor, declareTools, type Mode } from './governor.js';
+import { SAFE_DEFAULT_RULES, isLocal, localStore } from './local.js';
 import { classifyAction, extractToolCalls, extractToolDefinitions, redactSecrets, toPlain, type ActionCategory, type ActionPolicy, type RiskLevel, type ToolHints } from './actions.js';
-import { argsFingerprint, redactLocally, resolveCapture, shapeOf, summarize, type CaptureLevel } from './privacy.js';
+import { argsFingerprint, explicitCapture, captureLevel, traceAtCapture, type CaptureLevel } from './privacy.js';
 
 /**
  * Browser-safe AsyncLocalStorage fallback
@@ -136,8 +137,10 @@ export interface TraceCallOptions<T> {
 export interface Leap360ClientOptions {
   /** Override the API key (defaults to reading from ~/.leap360/config.json) */
   apiKey?: string;
-  /** Override the Cloud API URL */
+  /** Override the Cloud API URL. 'local' (or local: true, or LEAP360_LOCAL=1) works on this device with no cloud. */
   apiUrl?: string;
+  /** Read and change the local-mode files instead of the cloud (see Leap360Config.local) */
+  local?: boolean;
   /** If true, won't throw when the API is unreachable — just logs a warning */
   silent?: boolean;
   /** Project label — defaults to 'default' */
@@ -149,11 +152,17 @@ export interface Leap360ClientOptions {
 // ─── Config for auto-wrap Leap360 class ───────────────────────────────────
 
 export type Leap360Config = {
-  apiKey: string;
+  /** Your Leap360 API key. Not needed in local mode. */
+  apiKey?: string;
   projectId: string;
   serviceName: string;
-  /** Override the base URL (defaults to the deployed cloud API) */
+  /** Override the base URL (defaults to the deployed cloud API). 'local' is the same as local: true. */
   baseUrl?: string;
+  /**
+   * Run on this device with no cloud, account or API key: rules, Stop all, approvals and the activity log are files
+   * in ~/.leap360/local (LEAP360_HOME), managed with `npx leap360 local`. Also turned on by LEAP360_LOCAL=1.
+   */
+  local?: boolean;
   /**
    * 'shadow' observes and never blocks or slows a call; 'enforce' applies policies.
    * Leave unset to follow the mode set in the Leap360 console.
@@ -172,8 +181,14 @@ export type Leap360Config = {
    *     Message rules ("what agents say") need text, so they do not run at this level.
    *   'redacted': prompts, replies and arguments with credentials and personal details masked in your process.
    *   'full': everything, with credentials masked. For debugging.
+   * Leave it unset to follow the project's setting in the console (Settings, What Leap360 receives).
    */
   capture?: CaptureLevel;
+  /**
+   * Who the end user of this call is, in your own words (an id, never a name or email), so one end user's data can be
+   * deleted from the console. Called for each trace and tool call; return undefined when there is none.
+   */
+  endUserId?: () => string | null | undefined;
 };
 
 // ─── Internal run context (for createAgent) ────────────────────────────────
@@ -221,39 +236,18 @@ function buildTraceBody(
 
 let warnedUnknownKey = false;
 
-/** The safe defaults the console adds at onboarding (src/console/safeDefaults.ts): keep the two lists the same */
-export const SAFE_DEFAULT_RULES: { name: string; action: 'block' | 'ask_admin'; severity: string; match: { categories: ActionCategory[] } }[] = [
-  { name: 'Block destructive actions', action: 'block', severity: 'critical', match: { categories: ['db.destructive', 'infra.destroy', 'k8s.delete', 'fs.delete'] } },
-  { name: 'Hold payments and refunds', action: 'ask_admin', severity: 'high', match: { categories: ['payment'] } },
-  { name: 'Hold permission and secret changes', action: 'ask_admin', severity: 'high', match: { categories: ['iam.change', 'secrets.read'] } },
-  { name: 'Hold deploys and releases', action: 'ask_admin', severity: 'high', match: { categories: ['deploy', 'release.publish', 'infra.apply'] } },
-];
-
-/**
- * The trace at the capture level (issue #50). At 'metadata' no prompt or reply text leaves the process: the request
- * becomes a count of messages and the tools offered, and the reply becomes the tool calls the model asked for, each
- * classified here from its real arguments and sent as keys, types and risk.
- */
-export function traceAtCapture(body: Record<string, unknown>, level: CaptureLevel): Record<string, unknown> {
-  if (level === 'full') return { ...body, capture: level, request: redactSecrets(body['request']), response: redactSecrets(body['response']) };
-  if (level === 'redacted') return { ...body, capture: level, request: redactLocally(body['request']), response: redactLocally(body['response']), error: redactLocally(body['error']) };
-  const req = body['request'] as any;
-  const tools = extractToolDefinitions(req).map((t) => ({ type: 'function', name: t.name, ...(t.description ? { description: t.description } : {}) }));
-  const messages = Array.isArray(req?.messages) ? req.messages.length : Array.isArray(req?.contents) ? req.contents.length : undefined;
-  const calls = body['response'] ? extractToolCalls(toPlain(body['response'])) : [];
-  return {
-    ...body,
-    capture: 'metadata',
-    request: { captured: 'metadata', ...(messages !== undefined ? { messages } : {}), ...(tools.length ? { tools } : {}) },
-    response: calls.length
-      ? { captured: 'metadata', tool_calls: calls.slice(0, 50).map((c) => { const a = classifyAction(c); return { name: c.name, args: shapeOf(a.args), classified: summarize(a) }; }) }
-      : (body['response'] ? { captured: 'metadata' } : null),
-    error: typeof body['error'] === 'string' ? redactLocally(body['error'] as string).slice(0, 300) : body['error'] ?? null,
-  };
-}
+/** The safe defaults the console adds at onboarding, and local mode starts with (defined in local.ts) */
+export { SAFE_DEFAULT_RULES };
 
 async function postTrace(url: string, apiKey: string, rawBody: Record<string, unknown>, silent: boolean, capture: CaptureLevel = 'metadata') {
   const body = traceAtCapture(rawBody, capture);
+  // Local mode: the trace goes to activity.jsonl on this device, and Stop all is read from there too
+  if (isLocal(url)) {
+    const store = localStore();
+    store.log({ kind: 'trace', ...body });
+    const halted = store.halted(typeof rawBody['service_name'] === 'string' ? rawBody['service_name'] as string : undefined);
+    return halted ? { code: halted.code, message: halted.message } : { mode: store.mode(), local: true };
+  }
   // Each tool call the model asked for gets a salted fingerprint of its real arguments, so an approval lets that
   // exact call run on retry and nothing else
   const metaCalls = capture === 'metadata' ? (body['response'] as any)?.tool_calls : null;
@@ -323,9 +317,24 @@ async function postTrace(url: string, apiKey: string, rawBody: Record<string, un
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class Leap360 {
-  private config: Required<Omit<Leap360Config, 'mode' | 'failClosedAt' | 'approvalWaitMs' | 'decisions' | 'capture'>> & Pick<Leap360Config, 'mode' | 'failClosedAt' | 'approvalWaitMs' | 'decisions'>;
+  private config: Required<Omit<Leap360Config, 'mode' | 'failClosedAt' | 'approvalWaitMs' | 'decisions' | 'capture' | 'endUserId' | 'local'>> & Pick<Leap360Config, 'mode' | 'failClosedAt' | 'approvalWaitMs' | 'decisions' | 'endUserId'>;
+  /** The level the code chose; undefined means follow the project's setting */
+  private readonly explicitCapture: CaptureLevel | undefined;
+  /** The project's setting, learned from the API */
+  private projectCapture: CaptureLevel | undefined;
   /** What leaves this process: 'metadata' (default), 'redacted' or 'full' (issue #50) */
-  readonly capture: CaptureLevel;
+  get capture(): CaptureLevel { return this.explicitCapture ?? this.projectCapture ?? 'metadata'; }
+
+  /** Adds the end user's id, when the app gives one */
+  private withEndUser(body: Record<string, unknown>): Record<string, unknown> {
+    let id: unknown;
+    try { id = this.config.endUserId?.(); } catch { id = undefined; }
+    return typeof id === 'string' && id ? { ...body, end_user_id: id.slice(0, 200) } : body;
+  }
+
+  private learnCapture(v: unknown) {
+    if (v === 'metadata' || v === 'redacted' || v === 'full') this.projectCapture = v;
+  }
   private wrappedOpenAIClient: unknown = null;
   /** Mode last reported by the server */
   private serverMode: Mode | undefined;
@@ -348,7 +357,16 @@ export class Leap360 {
     return Leap360.haltCheck;
   }
 
+  /** True when this instance runs on this device with no cloud */
+  get local(): boolean { return isLocal(this.config.baseUrl); }
+
   private async fetchHalt(): Promise<boolean> {
+    if (this.local) {
+      const halted = !!localStore().halted(this.config.serviceName);
+      if (Leap360.isHalted && !halted) console.log('[Leap360] 🟢 Resumed: AI calls are allowed again.');
+      Leap360.isHalted = halted;
+      return halted;
+    }
     try {
       const base = this.config.baseUrl.replace(/\/$/, '');
       const opts = { headers: { 'x-api-key': this.config.apiKey }, signal: AbortSignal.timeout(1500) };
@@ -358,6 +376,7 @@ export class Leap360 {
       ]);
       if (p.ok && a.ok) {
         const [pj, aj] = await Promise.all([p.json() as Promise<any>, a.json() as Promise<any>]);
+        this.learnCapture(pj?.capture);
         const halted = pj?.status === 'SUSPENDED' || aj?.status === 'SUSPENDED';
         if (Leap360.isHalted && !halted) console.log('[Leap360] 🟢 Resumed: AI calls are allowed again.');
         Leap360.isHalted = halted;
@@ -367,11 +386,13 @@ export class Leap360 {
   }
 
   constructor(config: Leap360Config) {
+    const { local, ...rest } = config;
     this.config = {
-      ...config,
-      baseUrl: config.baseUrl || CLOUD_API_URL,
+      ...rest,
+      apiKey: config.apiKey ?? '',
+      baseUrl: local ? 'local' : config.baseUrl || CLOUD_API_URL,
     };
-    this.capture = resolveCapture(config.capture);
+    this.explicitCapture = explicitCapture(config.capture);
     Leap360.instance = this;
   }
 
@@ -401,6 +422,12 @@ export class Leap360 {
    * This blocks LLM calls BEFORE they happen (pre-flight check).
    */
   private startPollingStatus() {
+    if (this.local) {
+      // Reading a local file is cheap: pick up Stop all and Resume within a second, without keeping the process alive
+      void this.fetchHalt();
+      (setInterval(() => { void this.fetchHalt(); }, 1000) as any)?.unref?.();
+      return;
+    }
     const poll = async () => {
       try {
         const base = this.config.baseUrl.replace(/\/$/, '');
@@ -409,8 +436,9 @@ export class Leap360 {
         const projectUrl = `${base}/v1/projects/${this.config.projectId}/status`;
         const projectRes = await fetch(projectUrl, { headers: { 'x-api-key': this.config.apiKey } });
         if (projectRes.ok) {
-          const data = await projectRes.json() as { status: string; mode?: Mode };
+          const data = await projectRes.json() as { status: string; mode?: Mode; capture?: string };
           if (data.mode === 'shadow' || data.mode === 'enforce') this.serverMode = data.mode;
+          this.learnCapture(data.capture);
           const wasHalted = Leap360.isHalted;
           Leap360.isHalted = data.status === 'SUSPENDED';
           if (Leap360.isHalted && !wasHalted) {
@@ -474,7 +502,8 @@ export class Leap360 {
 
     // --- Strategy 2: Dynamic import (ESM) — patch after module loads ---
     // Wrap @google/generative-ai via dynamic import
-    import('@google/generative-ai').then((mod: any) => {
+    // A non-literal specifier: an optional package, so the build must not need it installed
+    import(String('@google/generative-ai')).then((mod: any) => {
       const GAI = mod.GoogleGenerativeAI;
       if (GAI?.prototype) { this.wrapGooglePrototype(GAI); patchedCount++; }
     }).catch(() => { /* package not installed */ });
@@ -600,7 +629,7 @@ export class Leap360 {
         error:       error ? (error instanceof Error ? error.message : String(error)) : null,
       });
 
-      postTrace(self.config.baseUrl, self.config.apiKey, traceBody, false, self.capture)
+      postTrace(self.config.baseUrl, self.config.apiKey, self.withEndUser(traceBody), false, self.capture)
         .then(res => {
           if (res && (res as any).code === 'GOVERNANCE_HALT') {
             Leap360.isHalted = true;
@@ -782,7 +811,7 @@ export class Leap360 {
       error:       error ? (error instanceof Error ? error.message : String(error)) : null,
     });
 
-    postTrace(this.config.baseUrl, this.config.apiKey, traceBody, false, this.capture)
+    postTrace(this.config.baseUrl, this.config.apiKey, this.withEndUser(traceBody), false, this.capture)
       .then(res => {
         if (res && (res as any).code === 'GOVERNANCE_HALT') {
           Leap360.isHalted = true;
@@ -842,7 +871,7 @@ export class Leap360 {
     // Shadow mode: report in the background and never block or slow the call. The kill switch still
     // applies: a halt in the reply stops the next call, and the status poller catches it within 15 s.
     if (this.isShadow()) {
-      postTrace(this.config.baseUrl, this.config.apiKey, traceBody, false, this.capture)
+      postTrace(this.config.baseUrl, this.config.apiKey, this.withEndUser(traceBody), false, this.capture)
         .then((res: any) => {
           this.learnMode(res);
           if (res?.code === 'GOVERNANCE_HALT' || res?.code === 'AGENT_HALT') {
@@ -855,7 +884,7 @@ export class Leap360 {
     }
 
     try {
-      const res = await postTrace(this.config.baseUrl, this.config.apiKey, traceBody, false, this.capture);
+      const res = await postTrace(this.config.baseUrl, this.config.apiKey, this.withEndUser(traceBody), false, this.capture);
       this.learnMode(res);
       
       // Check for kill switch
@@ -1043,7 +1072,7 @@ export class Leap360 {
             timestamp:   new Date(startTime).toISOString(),
             error:       error ? (error instanceof Error ? error.message : String(error)) : null,
           });
-          postTrace(self.config.baseUrl, self.config.apiKey, traceBody, false, self.capture)
+          postTrace(self.config.baseUrl, self.config.apiKey, self.withEndUser(traceBody), false, self.capture)
             .catch(e => console.error('[Leap360]', e));
         }
         return response!;
@@ -1080,7 +1109,7 @@ export class Leap360 {
             timestamp:   new Date(startTime).toISOString(),
             error:       error ? (error instanceof Error ? error.message : String(error)) : null,
           });
-          postTrace(self.config.baseUrl, self.config.apiKey, traceBody, false, self.capture)
+          postTrace(self.config.baseUrl, self.config.apiKey, self.withEndUser(traceBody), false, self.capture)
             .catch(e => console.error('[Leap360]', e));
         }
         return result!;
@@ -1219,7 +1248,7 @@ export class Leap360 {
             timestamp: new Date(startTime).toISOString(),
             error: error ? (error instanceof Error ? error.message : String(error)) : null,
           });
-          postTrace(self.config.baseUrl, self.config.apiKey, traceBody, false, self.capture)
+          postTrace(self.config.baseUrl, self.config.apiKey, self.withEndUser(traceBody), false, self.capture)
             .catch(e => console.error('[Leap360]', e));
         }
         return result!;
@@ -1446,6 +1475,7 @@ export class Leap360 {
 
   private learnMode(res: any) {
     if (res?.mode === 'shadow' || res?.mode === 'enforce') this.serverMode = res.mode;
+    this.learnCapture(res?.capture);
   }
 
   /** True when calls are observed but never blocked or slowed */
@@ -1465,7 +1495,8 @@ export class Leap360 {
         failClosedAt: this.config.failClosedAt,
         approvalWaitMs: this.config.approvalWaitMs,
         decisions: this.config.decisions,
-        capture: this.capture,
+        capture: this.explicitCapture,
+        endUserId: this.config.endUserId,
         log: (m) => console.warn(m),
       });
       this.governors.set(agentName, g);
@@ -1526,12 +1557,15 @@ export class Leap360Client {
   readonly capture:  CaptureLevel;
 
   constructor(options: Leap360ClientOptions = {}) {
-    this.capture   = resolveCapture(options.capture);
-    this.apiUrl    = options.apiUrl    || CLOUD_API_URL;
+    this.capture   = explicitCapture(options.capture) ?? 'metadata';
+    this.apiUrl    = options.local ? 'local' : options.apiUrl || CLOUD_API_URL;
     this.silent    = options.silent    ?? true;
     this.projectId = options.projectId || 'default';
 
-    if (options.apiKey) {
+    if (isLocal(this.apiUrl)) {
+      // No account on this device: the key only salts argument fingerprints
+      this.apiKey = options.apiKey || 'local';
+    } else if (options.apiKey) {
       this.apiKey = options.apiKey;
     } else if (process.env['LEAP360_API_KEY']) {
       this.apiKey = process.env['LEAP360_API_KEY'];
@@ -1619,6 +1653,7 @@ export class Leap360Client {
   // changing or deleting a policy need a person signed in to the console, and resolve to { code: 'PERSON_REQUIRED' }.
 
   private async request<T = any>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>): Promise<T> {
+    if (isLocal(this.apiUrl)) return localStore().request(method, path, body, query) as T;
     if (!this.apiKey) return { error: 'No API key. Pass apiKey or set LEAP360_API_KEY.', code: 'NO_API_KEY', httpStatus: 0 } as T;
     const qs = new URLSearchParams(Object.entries(query ?? {}).filter(([, v]) => v !== undefined).map(([k, v]): [string, string] => [k, String(v)])).toString();
     let res: Response;

@@ -1,6 +1,6 @@
 {
   "name": "leap360",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Access control for AI agents: check every tool call before it runs. Allow, hold for a person, block, or stop all. Works with OpenAI, Anthropic, Bedrock, Gemini, MCP and any LLM.",
   "homepage": "https://leap360.ai",
   "bugs": { "email": "sales@leap360.ai" },

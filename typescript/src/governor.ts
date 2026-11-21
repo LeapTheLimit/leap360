@@ -25,12 +25,15 @@ import {
   type ActionPolicy, type ActionSource, type ClassifiedAction, type Finding, type RiskLevel, type ToolCall, type ToolHints, type Verdict,
 } from './actions.js';
 import { CLOUD_API_URL } from './config.js';
-import { argPatternMatches, argsFingerprint, findingWithoutValue, redactLocally, resolveCapture, shapeOf, summarize, type CaptureLevel } from './privacy.js';
+import { isLocal, localStore, type LocalStore } from './local.js';
+import { argPatternMatches, argsFingerprint, explicitCapture, findingWithoutValue, redactLocally, shapeOf, summarize, type CaptureLevel } from './privacy.js';
 
 export type Mode = 'shadow' | 'enforce';
 
 export interface GovernorOptions {
+  /** Not needed in local mode */
   apiKey: string;
+  /** 'local' runs on this device with no cloud (see local.ts). Default: LEAP360_API_URL, or 'local' when LEAP360_LOCAL=1. */
   baseUrl?: string;
   agentName: string;
   /** Force a mode locally. Leave unset to follow the mode set in the Leap360 console. */
@@ -60,9 +63,12 @@ export interface GovernorOptions {
   /**
    * What leaves this process (issue #50). 'metadata' (default): tool name, argument keys and types and the
    * classified action, never argument values or results. 'redacted': values with personal details masked here.
-   * 'full': everything, credentials still masked. Also set by LEAP360_CAPTURE.
+   * 'full': everything, credentials still masked. Also set by LEAP360_CAPTURE. Unset: the project's setting from the
+   * console, and metadata until the governor knows it.
    */
   capture?: CaptureLevel;
+  /** The end user of each call, in your own words (an id), so their data can be deleted from the console */
+  endUserId?: () => string | null | undefined;
 }
 
 export interface GateResult {
@@ -143,8 +149,9 @@ let declareTimer: ReturnType<typeof setTimeout> | null = null;
  * Separate from Governor so declaring a tool never caches a kill-switch status before the first call.
  */
 export function declareTools(target: { apiKey: string; baseUrl?: string; agentName: string }, tools: DeclaredTool[], source: ActionSource, server?: string): void {
-  if (!target.apiKey) return;
   const baseUrl = (target.baseUrl || CLOUD_API_URL).replace(/\/$/, '');
+  // The capability map is a console feature: nothing to send on this device
+  if (!target.apiKey || isLocal(baseUrl)) return;
   const qk = `${baseUrl}\u0000${target.apiKey}\u0000${target.agentName}`;
   for (const t of tools) {
     if (typeof t?.name !== 'string' || !t.name || t.name.length > 200) continue;
@@ -180,7 +187,10 @@ export function declareTools(target: { apiKey: string; baseUrl?: string; agentNa
 }
 
 export class Governor {
-  private readonly o: Required<Omit<GovernorOptions, 'mode'>> & { mode?: Mode };
+  private readonly o: Required<Omit<GovernorOptions, 'mode' | 'capture' | 'endUserId'>> & Pick<GovernorOptions, 'mode' | 'endUserId'>;
+  private readonly explicitCapture: CaptureLevel | undefined;
+  /** The project's setting from the console, learned from the API */
+  private projectCapture: CaptureLevel | undefined;
   /** Mode last reported by the server; undefined until it answers */
   private serverMode: Mode | undefined;
   private status: Status = { halted: null, at: 0 };
@@ -191,6 +201,8 @@ export class Governor {
   private pendingPre = new Map<string, Promise<unknown>>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private warned = new Set<string>();
+  /** Set in local mode: decisions, Stop all, approvals and the log all live on this device */
+  private readonly store: LocalStore | null;
 
   constructor(opts: GovernorOptions) {
     // Defaults go after the spread: callers pass options that are present but undefined
@@ -205,26 +217,43 @@ export class Governor {
       approvalWaitMs: opts.approvalWaitMs ?? 0,
       poll: opts.poll ?? true,
       log: opts.log ?? ((m) => console.error(m)),
-      capture: resolveCapture(opts.capture),
     };
-    if (this.o.poll) this.startPolling();
+    this.explicitCapture = explicitCapture(opts.capture);
+    this.store = isLocal(this.o.baseUrl) ? localStore() : null;
+    if (this.store) this.store.init();
+    else if (this.o.poll) this.startPolling();
   }
 
   /** The mode in effect right now */
   get mode(): Mode {
-    return this.o.mode ?? this.serverMode ?? 'enforce';
+    return this.o.mode ?? (this.store ? this.store.mode() : this.serverMode) ?? 'enforce';
   }
+
+  /** True when this governor runs on this device with no cloud */
+  get local(): boolean { return !!this.store; }
 
   get agentName(): string { return this.o.agentName; }
 
   /** What this governor sends: 'metadata', 'redacted' or 'full' */
-  get capture(): CaptureLevel { return this.o.capture; }
+  get capture(): CaptureLevel { return this.explicitCapture ?? (this.store ? this.store.rules().capture : this.projectCapture) ?? 'metadata'; }
+
+  private learnCapture(v: unknown) {
+    if (v === 'metadata' || v === 'redacted' || v === 'full') this.projectCapture = v;
+  }
+
+  private endUser(): string | undefined {
+    let id: unknown;
+    try { id = this.o.endUserId?.(); } catch { id = undefined; }
+    return typeof id === 'string' && id ? id.slice(0, 200) : undefined;
+  }
 
   /** The "before" report at the capture level. At 'metadata' the values stay here: only their shape and what they mean leave. */
   private async preBody(actionId: string, source: ActionSource, name: string, action: ClassifiedAction, hints?: ToolHints): Promise<Record<string, unknown>> {
-    const base = { phase: 'pre', id: actionId, source, agent_name: this.o.agentName, tool: name, hints, capture: this.o.capture };
-    if (this.o.capture === 'full') return { ...base, args: action.args };
-    if (this.o.capture === 'redacted') return { ...base, args: redactLocally(action.args) };
+    const level = this.capture;
+    const endUser = this.endUser();
+    const base = { phase: 'pre', id: actionId, source, agent_name: this.o.agentName, tool: name, hints, capture: level, ...(endUser ? { end_user_id: endUser } : {}) };
+    if (level === 'full') return { ...base, args: action.args };
+    if (level === 'redacted') return { ...base, args: redactLocally(action.args) };
     // Argument patterns are tested here. In enforce mode wait for the policies; in shadow mode use what is cached.
     const pol = this.mode === 'enforce' ? await this.currentPolicies() : (void this.currentPolicies(), this.policies);
     return {
@@ -251,6 +280,8 @@ export class Governor {
     if (!name.trim() || name.length > 200) {
       return { ...base, allowed: false, mode: this.mode, verdict: 'block', wouldBe: 'block', message: `"${name.slice(0, 40)}${name.length > 40 ? '…' : ''}" is not a valid tool name (1 to 200 characters), so it cannot be checked` };
     }
+
+    if (this.store) return this.checkLocal(this.store, base, source, hints);
 
     const body = await this.preBody(actionId, source, name, action, hints);
 
@@ -329,7 +360,7 @@ export class Governor {
     const text = outcome.ok ? resultText(outcome.result) : undefined;
     const findings = text ? scanText(text.length > MAX_SCAN_RESULT ? text.slice(0, MAX_SCAN_RESULT) : text, 'result') : [];
     const errText = outcome.error === undefined ? undefined : outcome.error instanceof Error ? outcome.error.message : resultText(outcome.error);
-    const level = this.o.capture;
+    const level = this.capture;
     const body = level === 'metadata'
       // No result or error text: only that it failed, and what kind of error
       ? {
@@ -342,7 +373,8 @@ export class Governor {
           ok: outcome.ok, error: maskFor(level, preview(errText)), duration_ms: Math.round(outcome.durationMs), result_preview: maskFor(level, preview(text)),
           output_findings: findings,
         };
-    const after = () => this.report(body).catch(() => {});
+    const store = this.store;
+    const after = store ? () => store.log(body) : () => this.report(body).catch(() => {});
     const pre = this.pendingPre.get(actionId);
     void (pre ? pre.then(after, after) : after());
     for (const f of findings) {
@@ -395,6 +427,79 @@ export class Governor {
     this.timer = null;
   }
 
+  // ── local mode ─────────────────────────────────────────────────────────
+
+  /**
+   * The whole decision on this device: Stop all, the rules in rules.json, Watch mode and approvals made with
+   * `leap360 local approve`. Never touches the network. Every call is written to activity.jsonl.
+   */
+  private async checkLocal(store: LocalStore, base: { actionId: string; action: ClassifiedAction }, source: ActionSource, hints?: ToolHints): Promise<GateResult> {
+    const { action } = base;
+    const name = action.name;
+    const agent = this.o.agentName;
+    const mode = this.mode;
+    const decided = decideAction(action, store.policies(), agent);
+    const halted = store.halted(agent);
+    const argsKey = await argsFingerprint('leap360-local', name, action.args);
+    let verdict: Verdict = decided.verdict;
+    let message = decided.verdict === 'allow' ? undefined : decided.reasons[0];
+    let approvalId: string | undefined;
+
+    if (halted) {
+      verdict = 'block';
+      message = halted.message;
+    } else if (mode === 'shadow') {
+      if (verdict !== 'allow') this.o.log(`[Leap360] 👁  watch: ${name} (${action.category}, ${action.risk} risk) would be ${WOULD_BE[verdict]}${decided.policy?.name ? ` by "${decided.policy.name}"` : ''}; it ran`);
+    } else if (verdict === 'review') {
+      if (store.isApproved(agent, name, argsKey)) {
+        verdict = 'allow';
+        message = 'Approved on this device';
+      } else {
+        const held = store.hold({ agent, tool: name, category: action.category, risk: action.risk, policy: decided.policy?.name, argsKey });
+        approvalId = held.id;
+        message = `Held for approval by "${decided.policy?.name ?? 'a rule'}". Approve it with: npx leap360 local approve ${held.id}`;
+        this.o.log(`[Leap360] ⏸  ${name} is held. Approve it with: npx leap360 local approve ${held.id}  (or reject ${held.id})`);
+        if (this.o.approvalWaitMs > 0) {
+          const until = Date.now() + this.o.approvalWaitMs;
+          let d = store.decision(held.id);
+          while (d === 'PENDING' && Date.now() < until) {
+            await new Promise((r) => setTimeout(r, Math.min(500, Math.max(0, until - Date.now()))));
+            d = store.decision(held.id);
+          }
+          if (d === 'APPROVED') { verdict = 'allow'; message = 'Approved on this device'; }
+          else if (d === 'REJECTED') { verdict = 'block'; message = 'Rejected on this device'; }
+        }
+      }
+    } else if (verdict === 'warn') {
+      this.o.log(`[Leap360] ⚠️ ${name}: ${message ?? 'policy warning'}`);
+    }
+
+    const effective: Verdict = halted ? 'block' : mode === 'shadow' ? 'allow' : verdict;
+    const level = this.capture;
+    const endUser = this.endUser();
+    store.log({
+      phase: 'pre', id: base.actionId, source, agent, tool: name, mode: mode === 'shadow' ? 'watch' : 'enforce',
+      verdict: effective, wouldBe: decided.verdict, category: action.category, risk: action.risk,
+      ...(decided.policy ? { policy: decided.policy.name } : {}),
+      ...(approvalId ? { approvalId } : {}),
+      ...(endUser ? { end_user_id: endUser } : {}),
+      findings: action.findings.map(findingWithoutValue),
+      args: level === 'full' ? action.args : level === 'redacted' ? redactLocally(action.args) : shapeOf(action.args),
+      ...(hints ? { hints } : {}),
+    });
+
+    return {
+      ...base,
+      allowed: effective === 'allow' || effective === 'warn',
+      mode,
+      verdict: effective,
+      wouldBe: halted ? 'block' : decided.verdict,
+      message,
+      policy: decided.policy,
+      offline: true,
+    };
+  }
+
   // ── internals ──────────────────────────────────────────────────────────
 
   private noDecision(base: { actionId: string; action: ClassifiedAction }, err: unknown): GateResult {
@@ -430,6 +535,7 @@ export class Governor {
   private learn(res: any) {
     if (!res || typeof res !== 'object') return;
     if (res.mode === 'shadow' || res.mode === 'enforce') this.serverMode = res.mode;
+    this.learnCapture(res.capture);
     if (res.code === 'GOVERNANCE_HALT' || res.code === 'AGENT_HALT') {
       if (!this.status.halted) this.o.log(`[Leap360] 🛡️ ${res.code}: ${res.message ?? 'Stopped by your team in Leap360. Do not retry.'}`);
       this.status = { halted: { code: res.code, message: res.message ?? 'Stopped by your team in Leap360. Do not retry.' }, at: Date.now() };
@@ -477,6 +583,7 @@ export class Governor {
         this.get(`/v1/projects/default/agents/${encodeURIComponent(this.o.agentName)}/status?caller=sdk`, timeout),
       ]);
       if (project?.mode === 'shadow' || project?.mode === 'enforce') this.serverMode = project.mode;
+      this.learnCapture(project?.capture);
       const wasHalted = !!this.status.halted;
       let halted: Status['halted'] = null;
       if (project?.status === 'SUSPENDED') halted = { code: 'GOVERNANCE_HALT', message: 'Stopped by your team in Leap360 (Stop all is on). Do not retry.' };

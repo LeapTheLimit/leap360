@@ -23,6 +23,8 @@ export type { Leap360Config, TracePayload, TraceCallOptions, Leap360ClientOption
 export { loadCredentials, clearCredentials, saveCredentials }       from './auth.js';
 export { CLOUD_API_URL, CREDENTIALS_PATH }                         from './config.js';
 export type { Credentials }                                         from './config.js';
+export { LocalStore, localStore, localHome, isLocal }               from './local.js';
+export type { LocalRules, LocalApproval }                           from './local.js';
 export { Governor, Leap360ActionBlockedError, declareTools }        from './governor.js';
 export type { Mode, GovernorOptions, GateResult, DeclaredTool }     from './governor.js';
 export {

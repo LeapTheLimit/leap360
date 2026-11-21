@@ -23,6 +23,19 @@ def capture_level(value=None):
     return v if v in ("redacted", "full") else "metadata"
 
 
+def explicit_capture(value=None):
+    """The level the code chose (the argument, else LEAP360_CAPTURE), or None: then follow the project's setting"""
+    v = value if value is not None else os.environ.get("LEAP360_CAPTURE")
+    if v is None or str(v).strip() == "":
+        return None
+    return capture_level(v)
+
+
+def project_capture(value):
+    """The project's setting from an API answer, or None"""
+    return value if value in LEVELS else None
+
+
 def shape_of(value, _depth=0):
     """Keys and types, never values: {"amount": "number", "to": "string", "items": "array(3)"}"""
     if value is None:

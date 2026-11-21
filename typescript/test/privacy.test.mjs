@@ -137,3 +137,36 @@ test('policies with argument patterns apply at metadata only when the SDK says t
   assert.deepEqual(policiesForMetadata(ps, ['a']).map((p) => p.policyId), ['a', 'b']);
   assert.deepEqual(argPatternMatches(ps, { amount: 900 }), ['a']);
 });
+
+test("with no level in the code, the SDK follows the project's setting; the code's own level wins", async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (body) seen.push(JSON.parse(body));
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url.includes('/policies')) return res.end('{"policies":[]}');
+      if (req.url.includes('/status')) return res.end(JSON.stringify({ status: 'ACTIVE', mode: 'shadow', capture: 'redacted' }));
+      res.end(JSON.stringify({ decision: 'allow', mode: 'shadow', capture: 'redacted' }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const follow = new Governor({ apiKey: 'k', baseUrl: url, agentName: 'follow', mode: 'shadow', log: () => {}, endUserId: () => 'cust-7' });
+  const own = new Governor({ apiKey: 'k', baseUrl: url, agentName: 'own', mode: 'shadow', log: () => {}, capture: 'metadata' });
+  try {
+    await follow.check({ name: 'send_email', args: { to: 'jane@example.com' } }, 'sdk'); // learns the setting
+    await settle();
+    assert.equal(follow.capture, 'redacted');
+    await follow.check({ name: 'send_email', args: { to: 'jane@example.com' } }, 'sdk');
+    await own.check({ name: 'send_email', args: { to: 'jane@example.com' } }, 'sdk');
+    await settle();
+    const pre = seen.filter((b) => b.phase === 'pre');
+    assert.equal(pre[0].capture, 'metadata', 'metadata until the setting is known');
+    assert.deepEqual(pre[1].args, { to: 'j•••@example.com' }, 'then redacted, as the project says');
+    assert.equal(pre[1].end_user_id, 'cust-7', 'the end user id rides along');
+    assert.equal(own.capture, 'metadata');
+    assert.deepEqual(pre[2].args, { to: 'string' }, "the code's own level wins");
+  } finally { follow.stop(); own.stop(); server.close(); }
+});

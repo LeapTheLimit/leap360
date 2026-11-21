@@ -2,6 +2,24 @@
 
 All notable changes to the `leap360` npm package.
 
+## 1.12.0 (21 Nov 2026)
+
+- **Local mode: run Leap360 on your own device with no cloud, account or API key.** Set `LEAP360_LOCAL=1`, or pass `local: true` (`Leap360`, `Leap360Client`) or `baseUrl: 'local'` (`Governor`). Every tool call is classified and decided in your process from `~/.leap360/local/rules.json` (created with the safe default rules), Stop all and per-agent stops are read from `state.json` within a second, held calls wait in `approvals.json`, and every call, outcome and LLM call is written to `activity.jsonl`. No network connection is opened.
+- New CLI commands: `leap360 local` (status), `local stop|resume [agent]`, `local approvals`, `local approve|reject <id>`, `local mode watch|enforce`, `local rules`, `local log`. `mcp-proxy --local`, and `agents`, `push-check` follow `LEAP360_LOCAL=1`.
+- `Leap360Config.apiKey` is optional (not needed in local mode). `LocalStore`, `localStore`, `isLocal` and `localHome` are exported.
+- README: the environment variable is `LEAP360_API_URL` (it said `LEAP360_BASE_URL`, which was never read).
+
+## 1.11.1 (18 Nov 2026)
+
+- **The classifier sees through disguised commands.** Look-alike (full-width) letters and invisible characters are folded before matching, so `DＲＯＰ TABLE` or `rm -rf /` with a zero-width space inside score the same as the plain text. Decoded base64 run through `$(...)`, backticks or `eval` is critical.
+- Very large arguments: each string is scanned up to 64 KB, so a 10 MB argument no longer crashes the classifier.
+
+## 1.11.0 (11 Nov 2026)
+
+- **The project decides what Leap360 receives** (issue #50). In the console, Settings › What Leap360 receives sets the project's level. An SDK with no `capture` of its own (and no `LEAP360_CAPTURE`) follows it within seconds, and sends metadata until it knows. The API never stores more than the project allows: content from an older SDK is classified, then kept as keys and types only.
+- **`endUserId`** on `Leap360` and `Governor`: a function that returns your own id for the end user of each call. Settings › Danger zone deletes everything recorded for one end user, or for one agent.
+- Retention: calls stored with content are kept 30 days; metadata only, 90 days.
+
 ## 1.10.0 (11 Nov 2026)
 
 - **Privacy by default** (issue #50). New option `capture` (also `LEAP360_CAPTURE`, and `--capture` on `mcp-proxy`):
