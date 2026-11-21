@@ -23,13 +23,14 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync as writeFileSyncNode } from 'node:fs';
 import { installPushHook, pushCheck } from './pushcheck.js';
 import { CLOUD_API_URL } from './config.js';
+import { isLocal, localStore } from './local.js';
 
 const program = new Command();
 
 program
   .name('leap360')
   .description('Leap360 AI Governance SDK CLI')
-  .version('1.10.0')
+  .version('1.12.0')
   .enablePositionalOptions();
 
 // ─── Command: setup ────────────────────────────────────────────────────────
@@ -646,6 +647,7 @@ program
 
 // ─── Commands: stats and agents (the kill switch) ──────────────────────────
 function cliClient(): Leap360Client {
+  if (isLocal(CLOUD_API_URL)) return new Leap360Client({ local: true });
   const apiKey = process.env['LEAP360_API_KEY'] || loadCredentials()?.apiKey;
   if (!apiKey) { console.error('\n⚠️  Not signed in. Run: \x1b[36mnpx leap360 login\x1b[0m\n'); process.exit(1); }
   return new Leap360Client({ apiKey, apiUrl: process.env['LEAP360_API_URL'] || CLOUD_API_URL });
@@ -760,7 +762,7 @@ program
       try { remoteSha = execFileSync('git', ['rev-parse', `origin/${branch}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* new branch */ }
       stdin = `refs/heads/${branch} ${sha} refs/heads/${branch} ${remoteSha}\n`;
     }
-    if (!apiKey && !o.dryRun) { console.error('[Leap360] No API key, so this push was not checked. Run npx leap360 login.'); return; }
+    if (!apiKey && !o.dryRun && !isLocal(CLOUD_API_URL)) { console.error('[Leap360] No API key, so this push was not checked. Run npx leap360 login, or set LEAP360_LOCAL=1 to check it on this device.'); return; }
     process.exitCode = await pushCheck({ cwd: process.cwd(), remoteUrl, stdin, apiKey: apiKey || '', baseUrl: process.env['LEAP360_API_URL'] || CLOUD_API_URL, dryRun: o.dryRun });
   });
 
@@ -795,6 +797,96 @@ program
     }
   });
 
+// ─── Commands: local (Leap360 on this device, no cloud) ────────────────────
+const local = program.command('local').description('Run Leap360 on this device with no cloud or account: rules, Stop all, approvals and the log');
+local
+  .command('status', { isDefault: true })
+  .description('Show the mode, Stop all, rules, held calls and where the files are')
+  .action(() => {
+    const s = localStore();
+    s.init();
+    const st = s.status();
+    const held = s.approvals().filter((a) => a.status === 'PENDING');
+    console.log(`\n   Folder      ${s.dir}`);
+    console.log(`   Mode        ${s.mode() === 'shadow' ? 'watch (nothing is blocked; the log shows what would be)' : 'enforce (rules apply)'}`);
+    console.log(`   Stop all    ${st.stopped ? 'ON: every agent is stopped' : 'off'}${st.stoppedAgents.length ? `   stopped agents: ${st.stoppedAgents.join(', ')}` : ''}`);
+    console.log(`   Rules       ${s.policies().length} (rules.json)`);
+    console.log(`   Held calls  ${held.length}${held.length ? '  (leap360 local approvals)' : ''}`);
+    console.log(`\n   Turn it on in your agent: LEAP360_LOCAL=1, or new Leap360({ local: true, ... })\n`);
+  });
+local
+  .command('init')
+  .description('Create rules.json with the safe default rules')
+  .action(() => {
+    const s = localStore();
+    console.log(s.init() ? `\n   Created ${nodePath.join(s.dir, 'rules.json')} with the safe default rules. Edit it to change them.\n` : `\n   ${nodePath.join(s.dir, 'rules.json')} already exists.\n`);
+  });
+local
+  .command('rules')
+  .description('List the rules in rules.json')
+  .action(() => {
+    console.log('');
+    for (const p of localStore().policies()) {
+      const m = p.match ?? {};
+      const what = [m.categories?.join(', '), m.tools?.length ? `tools ${m.tools.join(', ')}` : '', m.minRisk ? `${m.minRisk}+ risk` : '', m.argPattern ? `args /${m.argPattern}/` : ''].filter(Boolean).join('; ');
+      console.log(`   ${String(p.action === 'ask_admin' ? 'hold' : p.action).padEnd(6)} ${p.name}${what ? `  (${what})` : ''}`);
+    }
+    console.log('');
+  });
+local
+  .command('mode <mode>')
+  .description("'watch' (nothing is blocked; see what would be) or 'enforce' (rules apply)")
+  .action((mode: string) => {
+    try { const m = localStore().setMode(mode); console.log(`\n   Mode is now ${m === 'shadow' ? 'watch' : 'enforce'}.\n`); }
+    catch (e: any) { console.error(`\n❌  ${e.message}\n`); process.exitCode = 1; }
+  });
+local
+  .command('stop [agent]')
+  .description('Stop all agents on this device, or one agent. Takes effect within a second.')
+  .action((agent?: string) => { localStore().stop(agent); console.log(agent ? `\n⏸  ${agent} is stopped.\n` : '\n⏸  Stop all is on: every agent on this device is stopped.\n'); });
+local
+  .command('resume [agent]')
+  .description('Resume every agent (and clear Stop all), or one agent')
+  .action((agent?: string) => { localStore().resume(agent); console.log(agent ? `\n▶  ${agent} is running again.\n` : '\n▶  Stop all is off. Every agent is running.\n'); });
+local
+  .command('approvals')
+  .description('List tool calls held for approval')
+  .action(() => {
+    const held = localStore().approvals().filter((a) => a.status === 'PENDING');
+    if (!held.length) { console.log('\n   Nothing is waiting for approval.\n'); return; }
+    console.log('');
+    for (const a of held) console.log(`   ${a.id}  ${a.createdAt.slice(0, 19).replace('T', ' ')}  ${a.agent}  ${a.tool}  (${a.category}, ${a.risk})${a.policy ? `  "${a.policy}"` : ''}`);
+    console.log('\n   Approve with: leap360 local approve <id>   Reject with: leap360 local reject <id>\n');
+  });
+for (const [cmd, decision, word] of [['approve', 'APPROVED', 'Approved'], ['reject', 'REJECTED', 'Rejected']] as const) {
+  local
+    .command(`${cmd} <id>`)
+    .description(cmd === 'approve' ? 'Approve a held call: the same call may run for 15 minutes' : 'Reject a held call')
+    .action((id: string) => {
+      const a = localStore().decide(id, decision);
+      if (!a) { console.error(`\n❌  No held call with id ${id}. See: leap360 local approvals\n`); process.exitCode = 1; return; }
+      console.log(`\n   ${word}: ${a.tool} for ${a.agent}.${decision === 'APPROVED' ? ' Run it again within 15 minutes.' : ''}\n`);
+    });
+}
+local
+  .command('log')
+  .description('Show the latest checked tool calls')
+  .option('-n, --lines <n>', 'how many', '20')
+  .option('--json', 'print the raw JSON lines')
+  .action((o: { lines: string; json?: boolean }) => {
+    const rows = localStore().activity(Math.max(1, Number(o.lines) || 20));
+    if (o.json) { for (const r of rows) console.log(JSON.stringify(r)); return; }
+    if (!rows.length) { console.log('\n   No activity yet.\n'); return; }
+    console.log('');
+    for (const r of rows as any[]) {
+      const t = String(r.time ?? '').slice(11, 19);
+      if (r.kind === 'trace') console.log(`   ${t}  llm     ${r.service_name ?? ''}  ${r.provider ?? ''} ${r.model ?? ''}${r.error ? `  error` : ''}`);
+      else if (r.phase === 'pre') console.log(`   ${t}  ${String(r.verdict === 'review' ? 'held' : r.verdict === 'block' ? 'blocked' : r.verdict === 'warn' ? 'warned' : 'allowed').padEnd(7)} ${r.agent}  ${r.tool}  (${r.category}, ${r.risk})${r.mode === 'watch' && r.wouldBe !== 'allow' ? `  would be ${r.wouldBe === 'review' ? 'held' : r.wouldBe === 'block' ? 'blocked' : 'warned'}` : ''}${r.policy ? `  "${r.policy}"` : ''}`);
+      else if (r.phase === 'post') console.log(`   ${t}  ${r.ok ? 'done   ' : 'failed '} ${r.agent ?? r.agent_name}  ${r.duration_ms ?? '?'} ms`);
+    }
+    console.log('');
+  });
+
 // ─── Command: mcp-proxy ────────────────────────────────────────────────────
 // stdout belongs to the MCP protocol here: everything this command prints goes to stderr.
 program
@@ -806,6 +898,7 @@ program
   .option('--mode <mode>', "'shadow' (Watch: record what would be held or blocked) or 'enforce' (Blocking); default: the console's setting")
   .option('--fail-closed-at <risk>', 'when Blocking, block actions at or above this risk while Leap360 is unreachable', 'critical')
   .option('--api-key <key>', 'Leap360 API key (default: LEAP360_API_KEY, then the saved config)')
+  .option('--local', 'run on this device with no cloud or API key (same as LEAP360_LOCAL=1); see `leap360 local`')
   .option('--no-guard-output', 'when Blocking, pass tool output through unchanged (default: redact credentials, mark prompt injection)')
   .option('--approval-wait <seconds>', 'wait this long for a person to approve a held tool call (default 0: answer at once)', '0')
   .option('--capture <level>', "what leaves this machine: 'metadata' (default: tool names, argument keys and risk, no values), 'redacted' or 'full'")
@@ -817,8 +910,9 @@ Example (Claude Code, Cursor or Claude Desktop MCP config):
 
 Remote MCP servers: wrap them with mcp-remote, e.g.
   leap360 mcp-proxy --agent cursor -- npx -y mcp-remote https://example.com/mcp`)
-  .action(async (command: string, args: string[], o: { agent: string; mode?: string; failClosedAt: string; apiKey?: string; guardOutput: boolean; approvalWait: string; capture?: string }) => {
-    const apiKey = o.apiKey || process.env['LEAP360_API_KEY'] || loadCredentials()?.apiKey;
+  .action(async (command: string, args: string[], o: { agent: string; mode?: string; failClosedAt: string; apiKey?: string; local?: boolean; guardOutput: boolean; approvalWait: string; capture?: string }) => {
+    const local = o.local || isLocal(CLOUD_API_URL);
+    const apiKey = local ? 'local' : o.apiKey || process.env['LEAP360_API_KEY'] || loadCredentials()?.apiKey;
     if (!apiKey) {
       process.stderr.write('[Leap360] no API key: pass --api-key, set LEAP360_API_KEY, or run `npx leap360 setup`\n');
       process.exit(2);
@@ -837,7 +931,7 @@ Remote MCP servers: wrap them with mcp-remote, e.g.
       process.exit(2);
     }
     const code = await runMcpProxy({
-      command, args: args ?? [], agentName: o.agent, apiKey,
+      command, args: args ?? [], agentName: o.agent, apiKey, ...(local ? { baseUrl: 'local' } : {}),
       mode: o.mode as 'shadow' | 'enforce' | undefined,
       failClosedAt: o.failClosedAt as 'low' | 'medium' | 'high' | 'critical',
       guardOutput: o.guardOutput,

@@ -3,13 +3,13 @@ from setuptools import setup, find_packages
 
 setup(
     name="leap360",
-    version="1.3.0",
+    version="1.5.0",
     description="Leap360 AI Governance SDK for Python — trace OpenAI, Anthropic, Gemini, AWS Bedrock, and any LLM",
     long_description=open("README.md", "r", encoding="utf-8").read() if os.path.exists("README.md") else "AI Observability SDK",
     long_description_content_type="text/markdown",
     author="Leap360",
     author_email="hello@leap360.ai",
-    url="https://github.com/LeapTheLimit/Leap360-AI",
+    url="https://github.com/LeapTheLimit/leap360",
     packages=find_packages(),
     install_requires=[
         "requests>=2.25.1",

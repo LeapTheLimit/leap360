@@ -31,7 +31,8 @@ flowchart LR
 - **Actions, not just prompts.** Guardrails read text; Leap360 checks what the agent is about to *do*.
 - **Fast.** Calls your rules allow are decided in your process from cached rules, in about a millisecond.
 - **Safe to adopt.** New projects start in **Watch mode**: you see what your rules would do before anything is blocked.
-- **A person in the loop.** Risky calls wait for approval in the console or Slack.
+- **A person in the loop.** Risky calls wait for approval in the console.
+- **Runs on your device too.** Local mode needs no cloud, account or API key.
 - **Works with your stack.** OpenAI Agents SDK, LangGraph, CrewAI, Vercel AI SDK, MCP servers and your own code.
 
 ## Install
@@ -75,6 +76,22 @@ def refund_customer(order_id: str, amount: float):
 Run your agent once and its calls appear in the console under **Live activity**. When you are happy with what Watch mode shows, turn on blocking.
 
 **Using a coding agent?** Paste the setup prompt from the console into Claude Code, Cursor or Codex and it wraps your tools for you.
+
+## Run it on your own device
+
+No account needed: set `LEAP360_LOCAL=1` (or pass `local: true` / `local=True`) and Leap360 runs entirely on your
+machine. Rules, Stop all, approvals and the activity log are plain files in `~/.leap360/local`, and nothing is sent
+anywhere. The safe default rules block destructive calls and hold payments, permission changes and deploys for you.
+
+```bash
+LEAP360_LOCAL=1 node my-agent.js
+npx leap360 local approvals      # calls held for you
+npx leap360 local approve <id>
+npx leap360 local stop           # Stop all
+```
+
+Python: `python -m leap360.local ...` manages the same files. See [TypeScript docs](typescript/README.md#run-on-your-own-device-local-mode)
+and [Python docs](python/README.md#run-on-your-own-device-local-mode).
 
 ## MCP servers
 

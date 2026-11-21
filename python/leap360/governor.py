@@ -186,14 +186,21 @@ def _new_action_id():
 
 class Leap360Governor:
     def __init__(self, api_key=None, agent_name="python-agent", api_url=None, mode=None, fail_closed_at="critical",
-                 timeout=2.0, status_ttl=1.0, approval_wait=0.0, log=None, capture=None):
+                 timeout=2.0, status_ttl=1.0, approval_wait=0.0, log=None, capture=None, end_user_id=None, local=None):
         if mode not in (None, "shadow", "enforce"):
             raise ValueError("mode must be 'shadow', 'enforce' or None (follow the console)")
         if fail_closed_at not in RISKS[1:]:
             raise ValueError(f"fail_closed_at must be one of {RISKS[1:]}")
-        self.api_key = api_key or os.environ.get("LEAP360_API_KEY") or self._saved_key()
+        from .local import is_local, local_store
+        # Local mode (local=True, api_url="local" or LEAP360_LOCAL=1): everything runs on this device, no API key
+        if local is None:
+            local = is_local(api_url) if api_url else is_local(os.environ.get("LEAP360_API_URL")) if os.environ.get("LEAP360_API_URL") else is_local()
+        self._store = local_store() if local else None
+        if self._store:
+            self._store.init()
+        self.api_key = "local" if self._store else api_key or os.environ.get("LEAP360_API_KEY") or self._saved_key()
         self.agent_name = agent_name
-        self.api_url = (api_url or os.environ.get("LEAP360_API_URL") or DEFAULT_API_URL).rstrip("/")
+        self.api_url = "local" if self._store else (api_url or os.environ.get("LEAP360_API_URL") or DEFAULT_API_URL).rstrip("/")
         self.forced_mode = mode
         self.fail_closed_at = fail_closed_at
         self.timeout = timeout
@@ -201,8 +208,12 @@ class Leap360Governor:
         self.approval_wait = approval_wait
         self.log = log or (lambda m: print(m, flush=True))
         # What leaves this process (issue #50): 'metadata' (default), 'redacted' or 'full'. See leap360.privacy.
-        from .privacy import capture_level
-        self.capture = capture_level(capture)
+        # Unset: follow the project's setting in the console, metadata until it is known
+        from .privacy import explicit_capture
+        self._explicit_capture = explicit_capture(capture)
+        self._project_capture = None
+        # A function returning your own id for the end user of a call, so their data can be deleted from the console
+        self.end_user_id = end_user_id
         self._server_mode = None
         self._status = {"halted": None, "at": 0.0}
         self._status_lock = threading.Lock()
@@ -213,7 +224,33 @@ class Leap360Governor:
     # ── public ──────────────────────────────────────────────────────────
 
     @property
+    def capture(self):
+        """What leaves this process: 'metadata' (default), 'redacted' or 'full'"""
+        if self._store:
+            return self._explicit_capture or self._store.rules()["capture"]
+        return self._explicit_capture or self._project_capture or "metadata"
+
+    @property
+    def local(self):
+        """True when this governor runs on this device with no cloud"""
+        return self._store is not None
+
+    def _learn_capture(self, value):
+        from .privacy import project_capture
+        if project_capture(value):
+            self._project_capture = value
+
+    def _end_user(self):
+        try:
+            v = self.end_user_id() if callable(self.end_user_id) else None
+        except Exception:
+            v = None
+        return v[:200] if isinstance(v, str) and v else None
+
+    @property
     def mode(self):
+        if self._store:
+            return self.forced_mode or self._store.mode()
         return self.forced_mode or self._server_mode or "enforce"
 
     def wrap_tool(self, name=None, hints=None):
@@ -274,8 +311,8 @@ class Leap360Governor:
             if t.get("hints"):
                 row["hints"] = t["hints"]
             batch.append(row)
-        if not batch or not self.api_key:
-            return
+        if not batch or not self.api_key or self._store:
+            return  # the capability map is a console feature: nothing to send in local mode
 
         def post():
             try:
@@ -306,10 +343,14 @@ class Leap360Governor:
         action_id = _new_action_id()
         if not name.strip() or len(name) > 200:
             return GateResult(False, action_id, self.mode, "block", "block", message=f'"{name[:40]}" is not a valid tool name (1 to 200 characters), so it cannot be checked')
+        if self._store:
+            return self._check_local(action_id, name, plain, source, hints)
         from .privacy import redact_deep
         # At 'metadata' the arguments go with the check only: the API classifies them and keeps their keys and types
         sent = redact_deep(plain) if self.capture == "redacted" else plain
         body = {"phase": "pre", "id": action_id, "source": source, "agent_name": self.agent_name, "tool": name, "args": sent, "hints": hints, "capture": self.capture}
+        if self._end_user():
+            body["end_user_id"] = self._end_user()
 
         if self.mode == "shadow":
             halted = self._current_status()["halted"]
@@ -373,6 +414,9 @@ class Leap360Governor:
                 "result_preview": mask(text_of(result)) if ok else None,
                 "error": mask(text_of(f"{type(error).__name__}: {error}")) if error is not None else None,
             }
+        if self._store:
+            self._store.log(body)
+            return
         pending = self._pending_pre.get(action_id)
 
         def post():
@@ -383,6 +427,64 @@ class Leap360Governor:
             except Exception:
                 pass
         self._background(post)
+
+    # ── local mode ──────────────────────────────────────────────────────
+
+    def _check_local(self, action_id, name, plain, source, hints):
+        """The whole decision on this device: Stop all, rules.json, Watch mode and approvals. No network."""
+        import hashlib
+        from .local import classify, decide
+        from .privacy import redact_deep, shape_of
+        store = self._store
+        action = classify(name, plain, hints)
+        decided = decide(action, store.policies(), self.agent_name)
+        halted = store.halted(self.agent_name)
+        mode = self.mode
+        args_key = hashlib.sha256(f"{name}\0{json.dumps(plain, sort_keys=True, default=str)}".encode()).hexdigest()[:32]
+        verdict, message, approval_id = decided["verdict"], decided["reason"], None
+        policy_name = (decided["policy"] or {}).get("name")
+        if halted:
+            verdict, message = "block", halted["message"]
+        elif mode == "shadow":
+            if verdict != "allow":
+                by = f' by "{policy_name}"' if policy_name else ""
+                self.log(f"[Leap360] watch: {name} ({action['category']}, {action['risk']} risk) would be {WOULD_BE[verdict]}{by}; it ran")
+        elif verdict == "review":
+            if store.is_approved(self.agent_name, name, args_key):
+                verdict, message = "allow", "Approved on this device"
+            else:
+                held = store.hold(self.agent_name, name, action["category"], action["risk"], policy_name, args_key)
+                approval_id = held["id"]
+                message = f'Held for approval by "{policy_name or "a rule"}". Approve it with: python -m leap360.local approve {held["id"]}'
+                self.log(f"[Leap360] {name} is held. Approve it with: python -m leap360.local approve {held['id']}")
+                if self.approval_wait > 0:
+                    until = time.monotonic() + self.approval_wait
+                    d = store.decision(held["id"])
+                    while d == "PENDING" and time.monotonic() < until:
+                        time.sleep(min(0.5, max(0.0, until - time.monotonic())))
+                        d = store.decision(held["id"])
+                    if d == "APPROVED":
+                        verdict, message = "allow", "Approved on this device"
+                    elif d == "REJECTED":
+                        verdict, message = "block", "Rejected on this device"
+        elif verdict == "warn":
+            self.log(f"[Leap360] {name}: {message}")
+        effective = "block" if halted else "allow" if mode == "shadow" else verdict
+        level = self.capture
+        entry = {"phase": "pre", "id": action_id, "source": source, "agent": self.agent_name, "tool": name,
+                 "mode": "watch" if mode == "shadow" else "enforce", "verdict": effective, "wouldBe": decided["verdict"],
+                 "category": action["category"], "risk": action["risk"],
+                 "findings": [{k: v for k, v in f.items() if k != "value"} for f in action["findings"]],
+                 "args": plain if level == "full" else redact_deep(plain) if level == "redacted" else shape_of(plain)}
+        if policy_name:
+            entry["policy"] = policy_name
+        if approval_id:
+            entry["approvalId"] = approval_id
+        if self._end_user():
+            entry["end_user_id"] = self._end_user()
+        store.log(entry)
+        return GateResult(effective in ("allow", "warn"), action_id, mode, effective, "block" if halted else decided["verdict"],
+                          category=action["category"], risk=action["risk"], message=message, policy=decided["policy"], offline=True)
 
     # ── internals ───────────────────────────────────────────────────────
 
@@ -412,6 +514,7 @@ class Leap360Governor:
             return
         if res.get("mode") in ("shadow", "enforce"):
             self._server_mode = res["mode"]
+        self._learn_capture(res.get("capture"))
         if res.get("code") in ("GOVERNANCE_HALT", "AGENT_HALT"):
             with self._status_lock:
                 self._status = {"halted": {"code": res["code"], "message": res.get("message", "Stopped by your team in Leap360. Do not retry.")}, "at": time.monotonic()}
@@ -428,6 +531,8 @@ class Leap360Governor:
             agent = self._get(f"/v1/projects/default/agents/{urllib.request.quote(self.agent_name, safe='')}/status?caller=sdk")
             if project and project.get("mode") in ("shadow", "enforce"):
                 self._server_mode = project["mode"]
+            if project:
+                self._learn_capture(project.get("capture"))
             halted = None
             if project and project.get("status") == "SUSPENDED":
                 halted = {"code": "GOVERNANCE_HALT", "message": "Stopped by your team in Leap360 (Stop all is on). Do not retry."}

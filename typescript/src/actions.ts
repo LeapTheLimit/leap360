@@ -380,6 +380,8 @@ const COMMAND_RULES: Rule[] = [
   { category: 'shell.exec', risk: 'critical', re: /\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/i, why: 'pipes a download straight into a shell' },
   { category: 'shell.exec', risk: 'critical', re: /\b(?:(?:ba|z)?sh|source|\.)\s+<\(\s*(?:curl|wget)\b|\beval\s+["']?\$\(\s*(?:curl|wget)\b|\b(?:python3?|node|perl|ruby)\s+-[ce]\s+["']?\$\(\s*(?:curl|wget)\b/i, why: 'runs a download straight into a shell' },
   { category: 'shell.exec', risk: 'critical', re: /\bbase64\s+(?:-d|--decode|-D)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b|\bxxd\s+-r\b[^\n]*\|\s*(?:ba|z)?sh\b/i, why: 'runs an encoded command' },
+  // Decoded text run through command substitution or eval: bash -c "$(echo … | base64 -d)", eval `xxd -r …`
+  { category: 'shell.exec', risk: 'critical', re: /(?:\b(?:(?:ba|z)?sh|eval|exec|source|\.)\s+(?:-c\s+)?["']?)(?:\$\(|`)[^)`\n]*\b(?:base64\s+(?:-d|--decode|-D)|xxd\s+-r|openssl\s+(?:base64|enc)\s+-d)\b/i, why: 'runs an encoded command' },
   { category: 'fs.delete', risk: 'critical', re: /\brm\s+-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b|\bRemove-Item\b[^\n]*-Recurse/i, why: 'recursive force delete' },
   { category: 'fs.delete', risk: 'critical', re: /\b(?:mkfs(?:\.\w+)?|dd\s+if=|shred|format\s+[a-z]:)/i, why: 'wipes a disk or filesystem' },
   { category: 'k8s.delete', risk: 'critical', re: /\b(?:kubectl|oc)\s+delete\b|\bhelm\s+(?:uninstall|delete)\b/i, why: 'deletes Kubernetes resources' },
@@ -448,7 +450,8 @@ const TARGET_FLAG = /(?:^|\s)(--context|--kube-context|--namespace|-n|--env|--en
 /** Base64 runs that decode to readable text: a common way to slip a command or a key past a scanner */
 function decodeHidden(value: string): string[] {
   const out: string[] = [];
-  for (const m of value.matchAll(/[A-Za-z0-9+/_-]{16,}={0,2}/g)) {
+  // Only the first 64 KB: a multi-megabyte argument otherwise overflows the regex engine's stack
+  for (const m of value.slice(0, 65_536).matchAll(/[A-Za-z0-9+/_-]{16,8192}={0,2}/g)) {
     if (out.length >= 5) break;
     try {
       // atob and TextDecoder, not Buffer: this engine also runs in the browser
@@ -459,6 +462,13 @@ function decodeHidden(value: string): string[] {
     } catch { /* not base64 */ }
   }
   return out;
+}
+
+/** Folds full-width and other compatibility forms to plain text (NFKC) and drops invisible format characters */
+function unconfuse(value: string): string {
+  if (!/[^\x00-\x7f]/.test(value)) return value; // plain ASCII: nothing to fold
+  const v = value.length > 65_536 ? value.slice(0, 65_536) : value;
+  return v.normalize('NFKC').replace(/[\p{Cf}͏ᅟᅠㅤﾠ]/gu, '');
 }
 
 /** SQL and shell comments hide keywords: "drop /* cleanup *\/ table" */
@@ -475,6 +485,9 @@ const stripComments = (value: string, sql: boolean) => {
 function disguises(args: Record<string, unknown> | undefined, strings: { path: string; key: string; value: string }[]) {
   const out: { path: string; key: string; value: string }[] = [];
   for (const s of strings) {
+    // Look-alike and invisible characters: "DＲＯＰ TABLE" (full-width) or "r​m -rf" (zero-width space)
+    const plain = unconfuse(s.value);
+    if (plain !== s.value) out.push({ path: `${s.path} (normalized)`, key: s.key, value: plain });
     for (const d of decodeHidden(s.value)) out.push({ path: `${s.path} (decoded)`, key: s.key, value: d });
     const sql = /^(?:query|sql|statement|stmt)$/i.test(s.key);
     if (/\/\*|--/.test(s.value)) {
@@ -490,7 +503,8 @@ function disguises(args: Record<string, unknown> | undefined, strings: { path: s
 
 function flattenStrings(v: unknown, path: string, out: { path: string; key: string; value: string }[], depth = 0) {
   if (depth > 6 || out.length > 200 || v == null) return;
-  if (typeof v === 'string') { out.push({ path, key: path.split('.').pop() || '', value: v }); return; }
+  // The first 64 KB of a value is scored: enough for any command or query, and multi-megabyte blobs cannot overflow a regex
+  if (typeof v === 'string') { out.push({ path, key: path.split('.').pop() || '', value: v.length > 65_536 ? v.slice(0, 65_536) : v }); return; }
   if (typeof v === 'number' || typeof v === 'boolean') { out.push({ path, key: path.split('.').pop() || '', value: String(v) }); return; }
   if (Array.isArray(v)) {
     // argv arrays read as one command line too
@@ -522,7 +536,7 @@ export function classifyAction(call: ToolCall, hints: ToolHints = {}): Classifie
 
   // What the tool is called. MCP names are often namespaced ("github.merge_pull_request"),
   // and camelCase is split so "deleteNamespace" reads like "delete_namespace".
-  const name = call.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+  const name = unconfuse(call.name).replace(/([a-z0-9])([A-Z])/g, '$1_$2');
   for (const rule of NAME_RULES) {
     if (rule.re.test(name)) { set(rule.category, rule.risk, `tool name: ${rule.why}`); break; }
   }

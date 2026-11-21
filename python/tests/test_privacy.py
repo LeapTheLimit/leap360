@@ -52,6 +52,16 @@ class PrivacyTests(unittest.TestCase):
         self.assertIn("[PHONE ••32]", text)
         self.assertEqual(mask_text("on 2026-11-11"), "on 2026-11-11")
 
+    def test_follows_the_project_setting_unless_the_code_sets_one(self):
+        gov = Leap360Governor(api_key="k", end_user_id=lambda: "cust-7")
+        self.assertEqual(gov.capture, "metadata")
+        gov._learn({"capture": "redacted"})
+        self.assertEqual(gov.capture, "redacted")
+        own = Leap360Governor(api_key="k", capture="metadata")
+        own._learn({"capture": "full"})
+        self.assertEqual(own.capture, "metadata", "the code's own level wins")
+        self.assertEqual(gov._end_user(), "cust-7")
+
 
 if __name__ == "__main__":
     unittest.main()

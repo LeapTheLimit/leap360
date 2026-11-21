@@ -41,9 +41,14 @@ def _load_api_key():
 
 
 class Leap360:
-    def __init__(self, api_key=None, base_url=None, project_id="me", timeout=10.0):
-        self.api_key = api_key or _load_api_key()
-        self.base_url = (base_url or os.environ.get("LEAP360_API_URL") or DEFAULT_API_URL).rstrip("/")
+    def __init__(self, api_key=None, base_url=None, project_id="me", timeout=10.0, local=None):
+        from .local import is_local, local_store
+        # Local mode (local=True, base_url="local" or LEAP360_LOCAL=1): reads and changes the files on this device
+        if local is None:
+            local = is_local(base_url) if base_url else is_local()
+        self._store = local_store() if local else None
+        self.api_key = "local" if self._store else api_key or _load_api_key()
+        self.base_url = "local" if self._store else (base_url or os.environ.get("LEAP360_API_URL") or DEFAULT_API_URL).rstrip("/")
         # The API scopes every project route to the API key; the id in the path is only a label
         self.project_id = project_id
         self.timeout = timeout
@@ -51,6 +56,8 @@ class Leap360:
     # ─── HTTP ────────────────────────────────────────────────────────────
 
     def _request(self, method, path, body=None, params=None):
+        if self._store:
+            return self._store.request(method, path, body, params)
         if not self.api_key:
             return {"error": "No API key. Pass api_key or set LEAP360_API_KEY.", "code": "NO_API_KEY", "http_status": 0}
         try:

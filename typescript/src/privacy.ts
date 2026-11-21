@@ -15,7 +15,10 @@
  * text, so at `metadata` they do not run and the console says so.
  */
 
-import { redactSensitive, redactSecrets, isSafePattern, safeJson, type ActionPolicy, type ClassifiedAction, type Finding } from './actions.js';
+import {
+  classifyAction, extractToolCalls, extractToolDefinitions, redactSensitive, redactSecrets, isSafePattern, safeJson, toPlain,
+  type ActionPolicy, type ClassifiedAction, type Finding,
+} from './actions.js';
 
 export type CaptureLevel = 'metadata' | 'redacted' | 'full';
 export const DEFAULT_CAPTURE: CaptureLevel = 'metadata';
@@ -29,11 +32,24 @@ export function captureLevel(v: unknown): CaptureLevel {
   return DEFAULT_CAPTURE;
 }
 
-/** The capture level from LEAP360_CAPTURE, if set, else the option, else 'metadata' */
+/** The capture level from the option, else LEAP360_CAPTURE, else 'metadata' */
 export function resolveCapture(option?: CaptureLevel | string): CaptureLevel {
-  const env = typeof process !== 'undefined' ? process.env?.LEAP360_CAPTURE : undefined;
-  return captureLevel(option ?? env);
+  return explicitCapture(option) ?? DEFAULT_CAPTURE;
 }
+
+/**
+ * The level the code chose (the option, else LEAP360_CAPTURE), or undefined when it chose none. Then the SDK follows
+ * the project's setting from the console, and sends metadata until it knows it.
+ */
+export function explicitCapture(option?: CaptureLevel | string): CaptureLevel | undefined {
+  const env = typeof process !== 'undefined' ? process.env?.LEAP360_CAPTURE : undefined;
+  const v = option ?? env;
+  return v === undefined || v === null || v === '' ? undefined : captureLevel(v);
+}
+
+const ORDER: CaptureLevel[] = ['metadata', 'redacted', 'full'];
+/** The lower of two levels: what the API stores when the project allows less than the SDK sent */
+export const lowerCapture = (a: CaptureLevel, b: CaptureLevel): CaptureLevel => (ORDER.indexOf(a) <= ORDER.indexOf(b) ? a : b);
 
 /** Keys and types, never values: { amount: 'number', to: 'string', items: 'array(3)' } */
 export function shapeOf(value: unknown, depth = 0): unknown {
@@ -190,5 +206,28 @@ export function summarize(action: ClassifiedAction): ClassifiedSummary {
     risk: action.risk,
     reasons: action.reasons.slice(0, 10).map((r) => r.slice(0, 160)),
     findings: action.findings.slice(0, 20).map(findingWithoutValue),
+  };
+}
+
+/**
+ * The trace at the capture level (issue #50). At 'metadata' no prompt or reply text leaves the process: the request
+ * becomes a count of messages and the tools offered, and the reply becomes the tool calls the model asked for, each
+ * classified here from its real arguments and sent as keys, types and risk.
+ */
+export function traceAtCapture(body: Record<string, unknown>, level: CaptureLevel): Record<string, unknown> {
+  if (level === 'full') return { ...body, capture: level, request: redactSecrets(body['request']), response: redactSecrets(body['response']) };
+  if (level === 'redacted') return { ...body, capture: level, request: redactLocally(body['request']), response: redactLocally(body['response']), error: redactLocally(body['error']) };
+  const req = body['request'] as any;
+  const tools = extractToolDefinitions(req).map((t) => ({ type: 'function', name: t.name, ...(t.description ? { description: t.description } : {}) }));
+  const messages = Array.isArray(req?.messages) ? req.messages.length : Array.isArray(req?.contents) ? req.contents.length : undefined;
+  const calls = body['response'] ? extractToolCalls(toPlain(body['response'])) : [];
+  return {
+    ...body,
+    capture: 'metadata',
+    request: { captured: 'metadata', ...(messages !== undefined ? { messages } : {}), ...(tools.length ? { tools } : {}) },
+    response: calls.length
+      ? { captured: 'metadata', tool_calls: calls.slice(0, 50).map((c) => { const a = classifyAction(c); return { name: c.name, args: shapeOf(a.args), classified: summarize(a) }; }) }
+      : (body['response'] ? { captured: 'metadata' } : null),
+    error: typeof body['error'] === 'string' ? redactLocally(body['error'] as string).slice(0, 300) : body['error'] ?? null,
   };
 }

@@ -15,6 +15,7 @@ Leap360 checks every tool call your agents make before it runs: safe calls go th
 - [Getting an API Key](#getting-an-api-key)
 - [Privacy: what leaves your process](#privacy-what-leaves-your-process)
 - [Quick Start](#quick-start)
+- [Run on your own device (local mode)](#run-on-your-own-device-local-mode)
 - [Provider Integrations](#provider-integrations)
   - [AWS Bedrock](#aws-bedrock)
   - [OpenAI](#openai)
@@ -128,6 +129,54 @@ const leap = new Leap360({
   apiKey: 'leap360_your_key_here',
 });
 ```
+
+---
+
+## Run on your own device (local mode)
+
+Leap360 also runs entirely on your machine: no cloud, no account and no API key. Decisions, Stop all, approvals
+and the activity log all happen on this device, and nothing is sent anywhere.
+
+```bash
+export LEAP360_LOCAL=1          # or pass local: true in code
+```
+
+```javascript
+import { Leap360 } from 'leap360';
+
+const leap = new Leap360({ local: true, projectId: 'my-app', serviceName: 'support-bot' });
+const refund = leap.wrapTool('refund_customer', async (args) => realRefund(args));
+```
+
+On first use Leap360 creates `~/.leap360/local/rules.json` (set `LEAP360_HOME` to use another folder) with the
+safe default rules: destructive calls (dropping tables, `rm -rf`, deleting Kubernetes resources, destroying
+infrastructure) are blocked, and payments, permission and secret changes, deploys and releases are held for you.
+Edit the file to change the rules; changes apply on the next call, without a restart.
+
+Manage it from the terminal:
+
+```bash
+npx leap360 local                 # mode, Stop all, rules, held calls and where the files are
+npx leap360 local stop            # Stop all: every agent on this device stops within a second
+npx leap360 local stop my-agent   # stop one agent
+npx leap360 local resume          # resume every agent
+npx leap360 local approvals       # calls held for you
+npx leap360 local approve <id>    # let that exact call run (for 15 minutes)
+npx leap360 local reject <id>
+npx leap360 local mode watch      # nothing is blocked; the log shows what would have been
+npx leap360 local mode enforce    # rules apply
+npx leap360 local log             # the latest checked calls
+```
+
+The MCP proxy and the push check work the same way: `npx leap360 mcp-proxy --local ...`, or set `LEAP360_LOCAL=1`.
+`Leap360Client({ local: true })` reads and changes the same files.
+
+The files are plain JSON: `rules.json` (mode and rules), `state.json` (Stop all), `approvals.json` (held calls)
+and `activity.jsonl` (one line per call; arguments are stored with credentials and personal details masked,
+set `"capture"` in `rules.json` to change that). The Python SDK uses the same folder and format.
+
+What needs the cloud: the console, team approvals from other machines, rules on what agents say (message rules),
+the capability map, the shadow report and code scan history.
 
 ---
 
@@ -613,7 +662,9 @@ The SDK reads configuration from these environment variable names, in order of p
 | NEXT_PUBLIC_LEAP360_API_KEY | For Next.js public runtime config |
 | VITE_LEAP360_API_KEY | For Vite-based projects |
 | REACT_APP_LEAP360_API_KEY | For Create React App projects |
-| LEAP360_BASE_URL | Override the API base URL (for self-hosting) |
+| LEAP360_API_URL | Override the API base URL |
+| LEAP360_LOCAL | `1` runs on this device with no cloud or API key (see local mode) |
+| LEAP360_HOME | Folder for local mode files (default `~/.leap360/local`) |
 | LEAP360_CAPTURE | What leaves your process: `metadata` (default), `redacted` or `full` |
 
 You can also pass the key directly to the constructor:

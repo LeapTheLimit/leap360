@@ -68,7 +68,9 @@ tracer = Leap360Tracer(service_name="support-bot", capture="redacted")
 gov = Leap360Governor(agent_name="support-bot", capture="redacted")
 ```
 
-Or set `LEAP360_CAPTURE=redacted` for the whole process.
+Or set `LEAP360_CAPTURE=redacted` for the whole process. Leave `capture` unset to follow the project's setting in the console (Settings › What Leap360 receives).
+
+Pass `end_user_id=lambda: current_customer_id()` to the tracer or governor (your own id, never a name or email) to be able to delete one end user's data from the console.
 
 ---
 
@@ -101,6 +103,52 @@ from leap360 import Leap360
 
 leap = Leap360()  # reads LEAP360_API_KEY automatically
 ```
+
+---
+
+## Run on your own device (local mode)
+
+Leap360 also runs entirely on your machine: no cloud, no account and no API key. Decisions, Stop all, approvals
+and the activity log all happen on this device, and nothing is sent anywhere.
+
+```bash
+export LEAP360_LOCAL=1          # or pass local=True in code
+```
+
+```python
+from leap360 import Leap360Governor
+
+leap = Leap360Governor(agent_name="support-bot", local=True)
+
+@leap.wrap_tool("refund_customer")
+def refund_customer(order_id: str, amount: float):
+    ...
+```
+
+On first use Leap360 creates `~/.leap360/local/rules.json` (set `LEAP360_HOME` to use another folder) with the
+safe default rules: destructive calls are blocked, and payments, permission and secret changes, deploys and
+releases are held for you. Edit the file to change the rules; changes apply on the next call.
+
+Manage it from the terminal (no Node.js needed; `npx leap360 local ...` works on the same files):
+
+```bash
+python -m leap360.local                 # mode, Stop all, rules and held calls
+python -m leap360.local stop            # Stop all
+python -m leap360.local stop my-agent   # stop one agent
+python -m leap360.local resume
+python -m leap360.local approvals       # calls held for you
+python -m leap360.local approve <id>    # let that exact call run (for 15 minutes)
+python -m leap360.local reject <id>
+python -m leap360.local mode watch      # nothing is blocked; the log shows what would have been
+python -m leap360.local mode enforce    # rules apply
+python -m leap360.local log
+```
+
+`Leap360Tracer(local=True)` writes LLM calls to the same `activity.jsonl`, and `Leap360(local=True)` reads and
+changes the same files.
+
+What needs the cloud: the console, team approvals from other machines, rules on what agents say (message rules),
+the capability map and the shadow report.
 
 ---
 

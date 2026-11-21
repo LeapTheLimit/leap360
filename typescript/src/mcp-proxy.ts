@@ -232,7 +232,7 @@ export function runMcpProxy(opts: McpProxyOptions): Promise<number> {
 
   for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => child.kill(sig));
 
-  log(`[Leap360] MCP proxy for "${opts.agentName}" → ${opts.command} ${opts.args.join(' ')} (mode: ${opts.mode ?? 'from console'})`);
+  log(`[Leap360] MCP proxy for "${opts.agentName}" → ${opts.command} ${opts.args.join(' ')} (mode: ${opts.mode ?? (governor.local ? `${governor.mode === 'shadow' ? 'watch' : 'enforce'}, on this device` : 'from console')})`);
 
   return new Promise((resolve) => {
     child.on('error', (err) => { log(`[Leap360] could not start ${opts.command}: ${err.message}`); governor.stop(); resolve(127); });
